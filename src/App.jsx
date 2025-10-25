@@ -5,73 +5,60 @@ function simulateGameDiscrete(homeMetrics, awayMetrics, params) {
                                     threeOut_a0: -1.10, threeOut_a1: 2.6, threeOut_a2: 0.8, threeOut_a3: 0.9,
                                     fg_phi: 0.30 };
   const hfa_logit = (params.hfa ?? 0) / 12;
-  
-  // TEMP: Shrink effect sizes by 30% for stability while tuning
-  const shrink = 0.7;
-  const dm_stable = {
-    threeOut_a0: dm.threeOut_a0,
-    threeOut_a1: dm.threeOut_a1 * shrink,
-    threeOut_a2: dm.threeOut_a2 * shrink,
-    threeOut_a3: dm.threeOut_a3 * shrink,
-    td_b0: dm.td_b0,
-    td_b1: dm.td_b1 * shrink,
-    td_b2: dm.td_b2 * shrink,
-    td_b3: dm.td_b3 * shrink,
-    fg_phi: dm.fg_phi
-  };
 
   // --- DRIVES BUDGETING ---
   const MIN_TOTAL = 18, MAX_TOTAL = 30;
+  const MIN_D = 9, MAX_D = 15;
+
   const homeDriveExpect = homeMetrics.drives;
   const awayDriveExpect = awayMetrics.drives;
   let totalDrives = Math.round(homeDriveExpect + awayDriveExpect);
   totalDrives = clamp(totalDrives, MIN_TOTAL, MAX_TOTAL);
 
+  // Calculate tilt based on pace differential
   const tilt = clamp((homeDriveExpect - awayDriveExpect) * 0.1, -0.6, 0.6);
   let homeDrives = Math.round(totalDrives / 2 + tilt);
   let awayDrives = totalDrives - homeDrives;
 
-  const MIN_D = 9, MAX_D = 15;
+  // Ensure both teams' drives are within valid range
   homeDrives = clamp(homeDrives, MIN_D, MAX_D);
-  awayDrives = totalDrives - homeDrives;
-  if (awayDrives < MIN_D) { awayDrives = MIN_D; homeDrives = totalDrives - awayDrives; }
-  if (awayDrives > MAX_D) { awayDrives = MAX_D; homeDrives = totalDrives - awayDrives; }
-  // Final preservation
-  homeDrives = clamp(homeDrives, MIN_D, MAX_D);
-  awayDrives = totalDrives - homeDrives;
+  awayDrives = clamp(awayDrives, MIN_D, MAX_D);
+
+  // Adjust total if clamping changed the sum
+  totalDrives = homeDrives + awayDrives;
 
   const playTeam = (metrics) => {
     // 3-and-out probability
     // Negative signs on diffs are CORRECT: better offense (positive diff) → fewer 3-outs
     let logit_3out_raw =
-        (dm_stable.threeOut_a0 ?? -1.10) +
-        (dm_stable.threeOut_a1 ?? 2.6) * (-(metrics.epa_diff ?? 0)) +     // Negative is correct!
-        (dm_stable.threeOut_a2 ?? 0.8) * (-(metrics.sr_diff ?? 0)) +       // Negative is correct!
-        (dm_stable.threeOut_a3 ?? 0.9) * (metrics.opp_3out_centered ?? 0) +
+        (dm.threeOut_a0 ?? -1.10) +
+        (dm.threeOut_a1 ?? 2.6) * (-(metrics.epa_diff ?? 0)) +     // Negative is correct!
+        (dm.threeOut_a2 ?? 0.8) * (-(metrics.sr_diff ?? 0)) +       // Negative is correct!
+        (dm.threeOut_a3 ?? 0.9) * (metrics.opp_3out_centered ?? 0) +
         (metrics.isHome ? -hfa_logit : hfa_logit);
     
-    // Tighter clamp to prevent extreme probabilities
-    const logit_3out = clamp(logit_3out_raw, -3.0, 3.0);  // p3 in ~[0.047, 0.953]
+    // Clamp to prevent extreme probabilities
+    const logit_3out = clamp(logit_3out_raw, -3.5, 3.5);  // Allow wider range
     let p_3out = sigmoid(logit_3out);
-    p_3out = clamp(p_3out, 0.18, 0.55);  // Hard caps for realism
+    p_3out = clamp(p_3out, 0.10, 0.60);  // Wider caps to differentiate elite vs weak offenses
 
     // TD given sustain
     let logit_td_raw =
-        (dm_stable.td_b0 ?? -0.85) +
-        (dm_stable.td_b1 ?? 3.0) * (metrics.epa_diff ?? 0) +
-        (dm_stable.td_b2 ?? 0.6) * (metrics.sr_diff ?? 0) +
-        (dm_stable.td_b3 ?? 1.2) * (metrics.rz_diff ?? 0) +
+        (dm.td_b0 ?? -0.85) +
+        (dm.td_b1 ?? 3.0) * (metrics.epa_diff ?? 0) +
+        (dm.td_b2 ?? 0.6) * (metrics.sr_diff ?? 0) +
+        (dm.td_b3 ?? 1.2) * (metrics.rz_diff ?? 0) +
         (metrics.strength_adj ?? 0) +
         (metrics.isHome ? hfa_logit : -hfa_logit);
     
-    const logit_td = clamp(logit_td_raw, -2.0, 2.0);
+    const logit_td = clamp(logit_td_raw, -2.5, 2.5);
     let p_td_given_sustain = sigmoid(logit_td);
-    p_td_given_sustain = clamp(p_td_given_sustain, 0.18, 0.42);  // Hard caps
+    p_td_given_sustain = clamp(p_td_given_sustain, 0.15, 0.50);  // Wider range for elite offenses
 
     // FG among non-TD mass with RZ factor bounded
     const rz_quality_factor = clamp(1 - ((metrics.rz_diff ?? 0) * 0.5), 0.7, 1.3);
-    let p_fg_given_sustain = (dm_stable.fg_phi ?? 0.30) * rz_quality_factor * (1 - p_td_given_sustain);
-    p_fg_given_sustain = clamp(p_fg_given_sustain, 0.10, 0.35);  // Hard caps
+    let p_fg_given_sustain = (dm.fg_phi ?? 0.30) * rz_quality_factor * (1 - p_td_given_sustain);
+    p_fg_given_sustain = clamp(p_fg_given_sustain, 0.08, 0.40);  // Wider range
     p_fg_given_sustain = Math.min(p_fg_given_sustain, 1 - p_td_given_sustain);  // Can't exceed available mass
 
     // Calculate outcome probabilities and normalize if needed
@@ -80,39 +67,23 @@ function simulateGameDiscrete(homeMetrics, awayMetrics, params) {
     let p_fg = p_sustain * p_fg_given_sustain;
     let p_empty = 1 - (p_td + p_fg + p_3out);
 
-    // Normalize if mass exceeds 1 (rounding errors)
-    if (p_empty < 0) {
+    // Normalize if probabilities don't sum to 1 (due to floating point or clamping)
+    const total = p_td + p_fg + p_3out + p_empty;
+    const eps = 0.001; // Tolerance for floating point errors
+
+    if (Math.abs(total - 1.0) > eps || p_empty < 0) {
+      // Renormalize all probabilities to sum to 1
       const k = 1 / (p_td + p_fg + p_3out);
       p_td *= k;
       p_fg *= k;
       p_3out *= k;
-      p_empty = 0;
+      p_empty = Math.max(0, 1 - (p_td + p_fg + p_3out));
     }
 
     // Draw drives using normalized probabilities
     let pts = 0;
     const drives = metrics.isHome ? homeDrives : awayDrives;
-    
-    // DEBUG: Log probabilities for first call only
-    if (!window.debugLogged) {
-      console.log("=== DRIVE PROBABILITIES ===");
-      console.log("Team:", metrics.isHome ? "HOME" : "AWAY");
-      console.log("Drives:", drives);
-      console.log("epa_diff:", metrics.epa_diff);
-      console.log("sr_diff:", metrics.sr_diff);
-      console.log("rz_diff:", metrics.rz_diff);
-      console.log("strength_adj:", metrics.strength_adj);
-      console.log("logit_3out:", logit_3out);
-      console.log("p_3out:", p_3out.toFixed(3));
-      console.log("p_td_given_sustain:", p_td_given_sustain.toFixed(3));
-      console.log("p_fg_given_sustain:", p_fg_given_sustain.toFixed(3));
-      console.log("p_td (overall):", p_td.toFixed(3));
-      console.log("p_fg (overall):", p_fg.toFixed(3));
-      console.log("p_empty:", p_empty.toFixed(3));
-      console.log("Expected points:", (drives * (p_td * 7 + p_fg * 3)).toFixed(1));
-      window.debugLogged = true;
-    }
-    
+
     for (let i = 0; i < drives; i++) {
       const r = Math.random();
       if (r < p_3out) {
@@ -465,14 +436,6 @@ const MonteCarloSimulator = () => {
       const homeMetrics = estimateScore(homeData, awayData, params, effectiveHFA, true);
       const awayMetrics = estimateScore(awayData, homeData, params, effectiveHFA, false);
 
-      // DEBUG LOGGING
-      console.log("=== SIMULATION DEBUG ===");
-      console.log("Home Team:", homeTeam);
-      console.log("Away Team:", awayTeam);
-      console.log("Home Metrics:", homeMetrics);
-      console.log("Away Metrics:", awayMetrics);
-      console.log("params.lg:", params.lg);
-      
       const homeScores = [];
       const awayScores = [];
       const totals = [];
@@ -487,15 +450,6 @@ const MonteCarloSimulator = () => {
         totals.push(game.total);
         spreads.push(game.homePts - game.awayPts);
       }
-
-      // DEBUG: Check score distributions
-      console.log("=== SCORE DISTRIBUTIONS ===");
-      console.log("Home scores (first 20):", homeScores.slice(0, 20));
-      console.log("Away scores (first 20):", awayScores.slice(0, 20));
-      console.log("Home mean:", homeScores.reduce((a,b) => a+b) / homeScores.length);
-      console.log("Away mean:", awayScores.reduce((a,b) => a+b) / awayScores.length);
-      console.log("Home range:", Math.min(...homeScores), "-", Math.max(...homeScores));
-      console.log("Away range:", Math.min(...awayScores), "-", Math.max(...awayScores));
 
       // Calculate statistics
       const mean = (arr) => arr.reduce((a, b) => a + b, 0) / arr.length;
