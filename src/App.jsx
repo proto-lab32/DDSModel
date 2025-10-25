@@ -388,8 +388,9 @@ const MonteCarloSimulator = () => {
 
     // Small delay to allow UI to update
     setTimeout(() => {
-      const homeData = projectTeamFromDB(homeTeam);
-      const awayData = projectTeamFromDB(awayTeam);
+      try {
+        const homeData = projectTeamFromDB(homeTeam);
+        const awayData = projectTeamFromDB(awayTeam);
       
       // Use only the slider adjustment for HFA (no base HFA from database)
       const effectiveHFA = hfaAdjustment;
@@ -535,8 +536,8 @@ const MonteCarloSimulator = () => {
         home: {
           mean: mean(homeScores),
           median: median(homeScores),
-          min: Math.min(...homePtss),
-          max: Math.max(...homePtss),
+          min: Math.min(...homeScores),
+          max: Math.max(...homeScores),
           p10: percentile(homeScores, 0.1),
           p25: percentile(homeScores, 0.25),
           p75: percentile(homeScores, 0.75),
@@ -546,8 +547,8 @@ const MonteCarloSimulator = () => {
         away: {
           mean: mean(awayScores),
           median: median(awayScores),
-          min: Math.min(...awayPtss),
-          max: Math.max(...awayPtss),
+          min: Math.min(...awayScores),
+          max: Math.max(...awayScores),
           p10: percentile(awayScores, 0.1),
           p25: percentile(awayScores, 0.25),
           p75: percentile(awayScores, 0.75),
@@ -584,6 +585,11 @@ const MonteCarloSimulator = () => {
       });
 
       setIsSimulating(false);
+    } catch (error) {
+      console.error("Simulation error:", error);
+      alert(`Simulation failed: ${error.message}`);
+      setIsSimulating(false);
+    }
     }, 100);
   };
 
