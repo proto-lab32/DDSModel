@@ -9,15 +9,15 @@ function simulateGameDiscrete(homeMetrics, awayMetrics, params) {
   // TEMP: Shrink effect sizes by 30% for stability while tuning
   const shrink = 0.7;
   const dm_stable = {
-    threeOut_a0: dm_stable.threeOut_a0,
-    threeOut_a1: dm_stable.threeOut_a1 * shrink,
-    threeOut_a2: dm_stable.threeOut_a2 * shrink,
-    threeOut_a3: dm_stable.threeOut_a3 * shrink,
-    td_b0: dm_stable.td_b0,
-    td_b1: dm_stable.td_b1 * shrink,
-    td_b2: dm_stable.td_b2 * shrink,
-    td_b3: dm_stable.td_b3 * shrink,
-    fg_phi: dm_stable.fg_phi
+    threeOut_a0: dm.threeOut_a0,
+    threeOut_a1: dm.threeOut_a1 * shrink,
+    threeOut_a2: dm.threeOut_a2 * shrink,
+    threeOut_a3: dm.threeOut_a3 * shrink,
+    td_b0: dm.td_b0,
+    td_b1: dm.td_b1 * shrink,
+    td_b2: dm.td_b2 * shrink,
+    td_b3: dm.td_b3 * shrink,
+    fg_phi: dm.fg_phi
   };
 
   // --- DRIVES BUDGETING ---
