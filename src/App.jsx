@@ -129,6 +129,27 @@ const MonteCarloSimulator = () => {
     return n;
   };
 
+  // Get column with aliases, else return undefined (prevents silent defaults)
+  const getCol = (row, keys) => {
+    for (const k of keys) if (row[k] !== undefined) return row[k];
+    return undefined;
+  };
+
+  // Parse with warning if column not found
+  const safeParseNum = (row, keys, def, label) => {
+    const val = getCol(row, keys);
+    const out = parseNum(val, def);
+    if (val === undefined && label) console.warn(`Missing column "${label}", using default ${def}`);
+    return out;
+  };
+
+  const safeParsePct = (row, keys, def, label) => {
+    const val = getCol(row, keys);
+    const out = parsePct(val, def);
+    if (val === undefined && label) console.warn(`Missing column "${label}", using default ${def}`);
+    return out;
+  };
+
   const handleFileUpload = async (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -177,7 +198,7 @@ const MonteCarloSimulator = () => {
       off_epa: parseNum(r["Off EPA/play"], 0.022), // EPA - regular number
       off_sr: parsePct(r["Off Success Rate"], 0.43), // Success rate - percentage
       off_xpl: parsePct(r["Off Explosive Rate"], 0.113), // Explosive rate - percentage
-      off_rz: parsePct(r["Off Red-Zone TD%"], 0.56), // Red zone % - percentage
+      off_rz: safeParsePct(r, ["Off Red Zone TD %", "Off Red-Zone TD%", "Off Red-Zone TD %", "Off RZ TD%", "Off RZ TD %"], 0.56, "Off Red Zone TD%"), // Red zone % - percentage
       off_3out: parsePct(r["Off 3-Out %"], 0.24), // 3-out % - percentage
       off_penalties: parseNum(r["Off Penalties per Drive"], 0.44), // Penalties - regular number
       off_dvoa: parseDVOA(r["Off DVOA"], 0), // DVOA - whole number (15% = 15)
@@ -187,8 +208,8 @@ const MonteCarloSimulator = () => {
       def_epa_allowed: parseNum(r["Def EPA/play allowed"], 0.022), // EPA - regular number
       def_sr: parsePct(r["Def Success Rate"], 0.43), // Success rate - percentage
       def_xpl: parsePct(r["Def Explosive Rate"], 0.113), // Explosive rate - percentage
-      def_penalties: parseNum(r["DEF Penalties per Drive"], 0.44), // Penalties - regular number
-      def_rz: parsePct(r["Def Red Zone TD %"], 0.56), // Red zone % - percentage
+      def_penalties: safeParseNum(r, ["DEF Penalties per Drive", "Def Penalties per Drive"], 0.44, "Def Penalties per Drive"), // Penalties - regular number
+      def_rz: safeParsePct(r, ["Def Red Zone TD %", "Def Red-Zone TD%", "Def Red-Zone TD %", "Def RZ TD%", "Def RZ TD %"], 0.56, "Def Red Zone TD%"), // Red zone % - percentage
       def_3out: parsePct(r["Def 3-Out %"], 0.24), // 3-out % - percentage
       def_dvoa: parseDVOA(r["Def DVOA"], 0), // DVOA - whole number (15% = 15)
       def_drives: parseNum(r["Def Drives/G"], 11.6), // Drives - regular number
