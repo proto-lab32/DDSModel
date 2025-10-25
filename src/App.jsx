@@ -75,7 +75,15 @@ function simulateGameDiscrete(homeMetrics, awayMetrics, params) {
 
 function estimateScore(team, oppDefense, params, hfa, isHome) {
   const z = (x, mu, sd) => (sd && sd > 0) ? (x - mu) / sd : 0;
-  const lg = params.lg ?? {};
+  
+  // Default league baselines (2024 NFL season approximations)
+  const lg = params.lg ?? {
+    PPD: 2.06, EPA: 0.022, SR: 0.43, Xpl: 0.113,
+    RZ: 0.56, ThreeOut: 0.24, Pen: 0.44,
+    PPD_sd: 0.30, EPA_sd: 0.045, SR_sd: 0.03,
+    Xpl_sd: 0.02, RZ_sd: 0.10, ThreeOut_sd: 0.04,
+    Pen_sd: 0.08
+  };
 
   // --- Offense raw -> z ---
   const z_ppd_o = z(team.off_ppd ?? lg.PPD, lg.PPD, lg.PPD_sd);
