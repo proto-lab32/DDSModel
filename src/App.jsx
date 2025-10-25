@@ -1073,6 +1073,5 @@ const MonteCarloSimulator = () => {
       </div>
     </div>
   );
-};
 
 export default MonteCarloSimulator;
