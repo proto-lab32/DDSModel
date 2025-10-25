@@ -366,8 +366,8 @@ const MonteCarloSimulator = () => {
       off_fp: parseNum(r["Off Avg Starting FP"], 25), // Field position - regular number (yards)
       no_huddle: parsePct(r["No-Huddle %"], 0), // No-huddle % - percentage
       ed_pass: parsePct(r["Neutral Early-Down Pass %"], 0.5), // Pass % - percentage
-      off_plays: parseNum(r["Off Plays/Drive"], 6), // Plays - regular number
-      def_plays: parseNum(r["Def Plays/Drive Allowed"], 6), // Plays - regular number
+      off_plays: parseNum(r["Off Plays/Drive"], 6) // Plays - regular number
+      def_plays: parseNum(r["Def Plays/Drive Allowed"], 6)};}; // Plays - regular number
       // HFA removed - will only use slider adjustment
   const zScore = (val, mean, sd) => (val - mean) / sd;
 
