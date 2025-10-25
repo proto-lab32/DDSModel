@@ -5,6 +5,20 @@ function simulateGameDiscrete(homeMetrics, awayMetrics, params) {
                                     threeOut_a0: -1.10, threeOut_a1: 2.6, threeOut_a2: 0.8, threeOut_a3: 0.9,
                                     fg_phi: 0.30 };
   const hfa_logit = (params.hfa ?? 0) / 12;
+  
+  // TEMP: Shrink effect sizes by 30% for stability while tuning
+  const shrink = 0.7;
+  const dm_stable = {
+    threeOut_a0: dm_stable.threeOut_a0,
+    threeOut_a1: dm_stable.threeOut_a1 * shrink,
+    threeOut_a2: dm_stable.threeOut_a2 * shrink,
+    threeOut_a3: dm_stable.threeOut_a3 * shrink,
+    td_b0: dm_stable.td_b0,
+    td_b1: dm_stable.td_b1 * shrink,
+    td_b2: dm_stable.td_b2 * shrink,
+    td_b3: dm_stable.td_b3 * shrink,
+    fg_phi: dm_stable.fg_phi
+  };
 
   // --- DRIVES BUDGETING ---
   const MIN_TOTAL = 18, MAX_TOTAL = 30;
@@ -28,41 +42,87 @@ function simulateGameDiscrete(homeMetrics, awayMetrics, params) {
 
   const playTeam = (metrics) => {
     // 3-and-out probability
-    let logit_3out =
-        (dm.threeOut_a0 ?? -1.10) +
-        (dm.threeOut_a1 ?? 2.6) * (-(metrics.epa_diff ?? 0)) +
-        (dm.threeOut_a2 ?? 0.8) * (-(metrics.sr_diff ?? 0)) +
-        (dm.threeOut_a3 ?? 0.9) * (metrics.opp_3out_centered ?? 0) +  // z-score of opponent 3&O rate
+    // Negative signs on diffs are CORRECT: better offense (positive diff) → fewer 3-outs
+    let logit_3out_raw =
+        (dm_stable.threeOut_a0 ?? -1.10) +
+        (dm_stable.threeOut_a1 ?? 2.6) * (-(metrics.epa_diff ?? 0)) +     // Negative is correct!
+        (dm_stable.threeOut_a2 ?? 0.8) * (-(metrics.sr_diff ?? 0)) +       // Negative is correct!
+        (dm_stable.threeOut_a3 ?? 0.9) * (metrics.opp_3out_centered ?? 0) +
         (metrics.isHome ? -hfa_logit : hfa_logit);
-    const p_3out = sigmoid(clamp(logit_3out, -8, 8));
+    
+    // Tighter clamp to prevent extreme probabilities
+    const logit_3out = clamp(logit_3out_raw, -3.0, 3.0);  // p3 in ~[0.047, 0.953]
+    let p_3out = sigmoid(logit_3out);
+    p_3out = clamp(p_3out, 0.18, 0.55);  // Hard caps for realism
 
     // TD given sustain
-    let logit_td =
-        (dm.td_b0 ?? -0.85) +
-        (dm.td_b1 ?? 3.0) * (metrics.epa_diff ?? 0) +
-        (dm.td_b2 ?? 0.6) * (metrics.sr_diff ?? 0) +
-        (dm.td_b3 ?? 1.2) * (metrics.rz_diff ?? 0) +
+    let logit_td_raw =
+        (dm_stable.td_b0 ?? -0.85) +
+        (dm_stable.td_b1 ?? 3.0) * (metrics.epa_diff ?? 0) +
+        (dm_stable.td_b2 ?? 0.6) * (metrics.sr_diff ?? 0) +
+        (dm_stable.td_b3 ?? 1.2) * (metrics.rz_diff ?? 0) +
         (metrics.strength_adj ?? 0) +
         (metrics.isHome ? hfa_logit : -hfa_logit);
-    const p_td_given_sustain = sigmoid(clamp(logit_td, -8, 8));
+    
+    const logit_td = clamp(logit_td_raw, -2.0, 2.0);
+    let p_td_given_sustain = sigmoid(logit_td);
+    p_td_given_sustain = clamp(p_td_given_sustain, 0.18, 0.42);  // Hard caps
 
     // FG among non-TD mass with RZ factor bounded
     const rz_quality_factor = clamp(1 - ((metrics.rz_diff ?? 0) * 0.5), 0.7, 1.3);
-    let p_fg_given_sustain = (dm.fg_phi ?? 0.30) * rz_quality_factor * (1 - p_td_given_sustain);
-    p_fg_given_sustain = Math.max(0, Math.min(1 - p_td_given_sustain, p_fg_given_sustain));
+    let p_fg_given_sustain = (dm_stable.fg_phi ?? 0.30) * rz_quality_factor * (1 - p_td_given_sustain);
+    p_fg_given_sustain = clamp(p_fg_given_sustain, 0.10, 0.35);  // Hard caps
+    p_fg_given_sustain = Math.min(p_fg_given_sustain, 1 - p_td_given_sustain);  // Can't exceed available mass
 
-    // Draw drives
+    // Calculate outcome probabilities and normalize if needed
+    const p_sustain = 1 - p_3out;
+    let p_td = p_sustain * p_td_given_sustain;
+    let p_fg = p_sustain * p_fg_given_sustain;
+    let p_empty = 1 - (p_td + p_fg + p_3out);
+
+    // Normalize if mass exceeds 1 (rounding errors)
+    if (p_empty < 0) {
+      const k = 1 / (p_td + p_fg + p_3out);
+      p_td *= k;
+      p_fg *= k;
+      p_3out *= k;
+      p_empty = 0;
+    }
+
+    // Draw drives using normalized probabilities
     let pts = 0;
     const drives = metrics.isHome ? homeDrives : awayDrives;
+    
+    // DEBUG: Log probabilities for first call only
+    if (!window.debugLogged) {
+      console.log("=== DRIVE PROBABILITIES ===");
+      console.log("Team:", metrics.isHome ? "HOME" : "AWAY");
+      console.log("Drives:", drives);
+      console.log("epa_diff:", metrics.epa_diff);
+      console.log("sr_diff:", metrics.sr_diff);
+      console.log("rz_diff:", metrics.rz_diff);
+      console.log("strength_adj:", metrics.strength_adj);
+      console.log("logit_3out:", logit_3out);
+      console.log("p_3out:", p_3out.toFixed(3));
+      console.log("p_td_given_sustain:", p_td_given_sustain.toFixed(3));
+      console.log("p_fg_given_sustain:", p_fg_given_sustain.toFixed(3));
+      console.log("p_td (overall):", p_td.toFixed(3));
+      console.log("p_fg (overall):", p_fg.toFixed(3));
+      console.log("p_empty:", p_empty.toFixed(3));
+      console.log("Expected points:", (drives * (p_td * 7 + p_fg * 3)).toFixed(1));
+      window.debugLogged = true;
+    }
+    
     for (let i = 0; i < drives; i++) {
       const r = Math.random();
       if (r < p_3out) {
-        continue;
-      } else {
-        const r2 = Math.random();
-        if (r2 < p_td_given_sustain) pts += 7;
-        else if (r2 < p_td_given_sustain + p_fg_given_sustain) pts += 3;
+        continue;  // 3-and-out
+      } else if (r < p_3out + p_td) {
+        pts += 7;  // TD
+      } else if (r < p_3out + p_td + p_fg) {
+        pts += 3;  // FG
       }
+      // else: Empty (no points)
     }
     return pts;
   };
@@ -405,6 +465,14 @@ const MonteCarloSimulator = () => {
       const homeMetrics = estimateScore(homeData, awayData, params, effectiveHFA, true);
       const awayMetrics = estimateScore(awayData, homeData, params, effectiveHFA, false);
 
+      // DEBUG LOGGING
+      console.log("=== SIMULATION DEBUG ===");
+      console.log("Home Team:", homeTeam);
+      console.log("Away Team:", awayTeam);
+      console.log("Home Metrics:", homeMetrics);
+      console.log("Away Metrics:", awayMetrics);
+      console.log("params.lg:", params.lg);
+      
       const homeScores = [];
       const awayScores = [];
       const totals = [];
@@ -419,6 +487,15 @@ const MonteCarloSimulator = () => {
         totals.push(game.total);
         spreads.push(game.homePts - game.awayPts);
       }
+
+      // DEBUG: Check score distributions
+      console.log("=== SCORE DISTRIBUTIONS ===");
+      console.log("Home scores (first 20):", homeScores.slice(0, 20));
+      console.log("Away scores (first 20):", awayScores.slice(0, 20));
+      console.log("Home mean:", homeScores.reduce((a,b) => a+b) / homeScores.length);
+      console.log("Away mean:", awayScores.reduce((a,b) => a+b) / awayScores.length);
+      console.log("Home range:", Math.min(...homeScores), "-", Math.max(...homeScores));
+      console.log("Away range:", Math.min(...awayScores), "-", Math.max(...awayScores));
 
       // Calculate statistics
       const mean = (arr) => arr.reduce((a, b) => a + b, 0) / arr.length;
