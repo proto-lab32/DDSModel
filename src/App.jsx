@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState } from "react";
 import { Upload, Play, BarChart3, TrendingUp, Settings } from "lucide-react";
 
 /**
@@ -38,20 +38,20 @@ const MonteCarloSimulator = () => {
     },
     // Discrete drive model calibration parameters
     driveModel: {
-      // 3-and-out logit: p_3O = σ(a0 - a1·EPA_net - a2·SR_net + a3·Opp_3O)
-      threeOut_a0: -1.20,     // Baseline intercept (~23% 3-out rate)
-      threeOut_a1: 1.5,       // EPA coefficient (better EPA → fewer 3-outs)
-      threeOut_a2: 1.2,       // SR coefficient (better SR → fewer 3-outs)
-      threeOut_a3: 0.8,       // Opponent 3-out pressure
+      // 3-and-out logit: p_3O = σ(a0 - a1·EPA_diff - a2·SR_diff + a3·Opp_3O_rate)
+      threeOut_a0: -1.10,     // Baseline intercept (~25% 3-out rate)
+      threeOut_a1: 2.6,       // EPA differential coefficient (reduced from 3.5)
+      threeOut_a2: 0.8,       // SR differential coefficient (raw SR scale: ~0.05 units)
+      threeOut_a3: 1.5,       // Opponent 3-out rate (raw rate: 0.24 ± 0.05)
       
-      // TD|sustain logit: p_TD = σ(b0 + b1·EPA_net + b2·SR_net + b3·RZ_net)
-      td_b0: -1.20,           // Baseline intercept (~23% TD rate when sustained)
-      td_b1: 1.0,             // EPA coefficient
-      td_b2: 0.8,             // SR coefficient
-      td_b3: 1.5,             // RZ coefficient (most important for TDs)
+      // TD|sustain logit: p_TD = σ(b0 + b1·EPA_diff + b2·SR_diff + b3·RZ_diff)
+      td_b0: -0.85,           // Baseline intercept (~30% TD rate when sustained, up from 24%)
+      td_b1: 3.0,             // EPA differential coefficient
+      td_b2: 0.6,             // SR differential coefficient
+      td_b3: 1.2,             // RZ differential coefficient (raw RZ scale: ~0.12 units)
       
       // FG bias: p_FG|sustain = φ · (1 - p_TD|sustain)
-      fg_phi: 0.50,           // ~50% of non-TD sustained drives → FG
+      fg_phi: 0.30,           // ~20% FG among sustained at baseline (down from 45%)
     },
     weights: {
       PPD: 0.25,
@@ -69,7 +69,6 @@ const MonteCarloSimulator = () => {
       Pace_EDPass: 0.1,
       NoHuddle: 0.2,
     },
-    EV_SD_Total: 12.7,
   };
 
   const [teamDB, setTeamDB] = useState({});
@@ -213,23 +212,28 @@ const MonteCarloSimulator = () => {
   const simulateDrive = (metrics, hfa) => {
     const dm = params.driveModel;
     
-    // Apply HFA as an additive adjustment to the net metrics
-    // Positive HFA helps home team, negative helps away team
-    const hfa_adjustment = metrics.isHome ? (hfa / 30) : -(hfa / 30); // Scale HFA to ~0.1-0.3 logit units per point
+    // HFA has two components:
+    // 1. Direct logit shift (primary effect): ~0.083 per point of HFA
+    const hfa_logit = hfa / 12; // 3-point HFA = 0.25 logit adjustment
     
-    // Adjusted metrics with HFA
-    const epa_adj = metrics.epa_net + hfa_adjustment;
-    const sr_adj = metrics.sr_net + hfa_adjustment;
-    const rz_adj = metrics.rz_net + hfa_adjustment;
+    // 2. Pace adjustment (handled in drive count calculation)
+    // No need to adjust differentials - the logit shift handles skill expression
+    
+    // Use raw differentials without HFA nudging
+    const epa_diff = metrics.epa_diff;
+    const sr_diff = metrics.sr_diff;
+    const rz_diff = metrics.rz_diff;
     
     // 1. Sample 3-and-out probability
+    // Apply HFA logit shift (home team gets advantage, away team gets penalty)
     const logit_3out = 
       dm.threeOut_a0 - 
-      dm.threeOut_a1 * epa_adj - 
-      dm.threeOut_a2 * sr_adj + 
-      dm.threeOut_a3 * metrics.opp_3out;
+      dm.threeOut_a1 * epa_diff - 
+      dm.threeOut_a2 * sr_diff + 
+      dm.threeOut_a3 * metrics.opp_3out_centered - // Centered around league avg
+      (metrics.isHome ? hfa_logit : -hfa_logit); // Home advantage → fewer 3-outs
     
-    const p_3out = sigmoid(logit_3out);
+    const p_3out = sigmoid(Math.max(-8, Math.min(8, logit_3out)));
     
     // Roll for 3-and-out
     if (Math.random() < p_3out) {
@@ -239,12 +243,22 @@ const MonteCarloSimulator = () => {
     // 2. Drive sustained - now sample TD vs FG vs Empty
     const logit_td = 
       dm.td_b0 + 
-      dm.td_b1 * epa_adj + 
-      dm.td_b2 * sr_adj + 
-      dm.td_b3 * rz_adj;
+      dm.td_b1 * epa_diff + 
+      dm.td_b2 * sr_diff + 
+      dm.td_b3 * rz_diff +
+      metrics.strength_adj + // Better teams → more TDs
+      (metrics.isHome ? hfa_logit : -hfa_logit); // Home advantage → more TDs
     
-    const p_td_given_sustain = sigmoid(logit_td);
-    const p_fg_given_sustain = dm.fg_phi * (1 - p_td_given_sustain);
+    const p_td_given_sustain = sigmoid(Math.max(-8, Math.min(8, logit_td)));
+    
+    // Adjust FG probability based on red zone quality
+    // Better RZ teams score more TDs, leaving fewer non-TD drives for FGs/empties
+    // Worse RZ teams have more failed TD attempts → more FGs and turnovers
+    // Keep RZ effect bounded so FGs don't explode or vanish
+    const rz_quality_factor = Math.min(1.3, Math.max(0.7, 1 - (rz_diff * 0.5)));
+    let p_fg_given_sustain = dm.fg_phi * rz_quality_factor * (1 - p_td_given_sustain);
+    // Clamp FG probability to available non-TD mass
+    p_fg_given_sustain = Math.max(0, Math.min(1 - p_td_given_sustain, p_fg_given_sustain));
     
     // Roll for outcome (TD, FG, or Empty)
     const r = Math.random();
@@ -259,30 +273,37 @@ const MonteCarloSimulator = () => {
 
   // Simulate full game with discrete drives
   const simulateGameDiscrete = (homeMetrics, awayMetrics, hfa) => {
-    // Total drives in game - use average drives per team (each team gets ~11-12 possessions)
-    // So total possessions to simulate is roughly the average
-    const avgDrivesPerTeam = (homeMetrics.drives + awayMetrics.drives) / 2;
-    const totalDrives = Math.round(avgDrivesPerTeam);
+    // Total possessions ~ sum of team expectations (keeps league PPD honest)
+    let totalDrives = Math.round(homeMetrics.drives + awayMetrics.drives);
+    // Keep total drives within a realistic league window so per-team caps are satisfiable
+    const MIN_TOTAL = 18, MAX_TOTAL = 30;
+    totalDrives = Math.max(MIN_TOTAL, Math.min(MAX_TOTAL, totalDrives));
     
-    // Possession share based on pace differential
-    const pace_diff = homeMetrics.drives - awayMetrics.drives;
-    const home_share = 0.5 + (pace_diff / (avgDrivesPerTeam * 2)) * 0.15; // Small adjustment
+    // Small pace tilt to the faster team (bounded)
+    const tilt = Math.max(-0.6, Math.min(0.6, (homeMetrics.drives - awayMetrics.drives) * 0.1));
+    let homeDrives = Math.round(totalDrives / 2 + tilt);
+    let awayDrives = totalDrives - homeDrives; // preserve total
+    
+    // Safety bounds with total preservation
+    const MIN_D = 9, MAX_D = 15;
+    homeDrives = Math.max(MIN_D, Math.min(MAX_D, homeDrives));
+    awayDrives = totalDrives - homeDrives;
+    if (awayDrives < MIN_D) { awayDrives = MIN_D; homeDrives = totalDrives - awayDrives; }
+    if (awayDrives > MAX_D) { awayDrives = MAX_D; homeDrives = totalDrives - awayDrives; }
     
     let homeScore = 0;
     let awayScore = 0;
     
-    // Simulate each drive
-    for (let d = 0; d < totalDrives; d++) {
-      // Alternate possessions with slight bias based on pace
-      const isHomeDrive = Math.random() < home_share;
-      
-      if (isHomeDrive) {
-        const result = simulateDrive(homeMetrics, hfa);
-        homeScore += result.score;
-      } else {
-        const result = simulateDrive(awayMetrics, hfa);
-        awayScore += result.score;
-      }
+    // Simulate home team's drives
+    for (let d = 0; d < homeDrives; d++) {
+      const result = simulateDrive(homeMetrics, hfa);
+      homeScore += result.score;
+    }
+    
+    // Simulate away team's drives
+    for (let d = 0; d < awayDrives; d++) {
+      const result = simulateDrive(awayMetrics, hfa);
+      awayScore += result.score;
     }
     
     return { homeScore, awayScore };
@@ -338,37 +359,44 @@ const MonteCarloSimulator = () => {
     // Net advantage
     const net_adv = (eff_o + eff_d) / 2 + dvoa_adj + to_adj + fp_adj + pen_adj;
     
-    // Calculate matchup-specific net metrics for discrete drive model
-    const epa_net = z_epa_o - z_epa_d;
-    const sr_net = z_sr_o - z_sr_d;
-    const rz_net = z_rz_o - z_rz_d;
+    // Calculate matchup-specific raw differentials (NOT z-scores)
+    const epa_diff = team.off_epa - oppDefense.def_epa_allowed;
+    const sr_diff = team.off_sr - oppDefense.def_sr;
+    const rz_diff = team.off_rz - oppDefense.def_rz;
     
-    // Opponent 3-out pressure (defensive 3-out force rate)
-    const opp_3out = z_out_d;
+    // Opponent 3-out rate (centered around league average)
+    const opp_3out_centered = oppDefense.def_3out - lg.ThreeOut; // ~0 at league-average
     
-    // Calculate drives
+    // Apply net advantage as a logit adjustment with soft-shrink
+    // Large edges get proportionally smaller bumps to prevent blowouts
+    // This wires in DVOA, penalties, turnovers, FP
+    const raw_strength = net_adv * 0.12;
+    const strength_adj = Math.max(-0.2, Math.min(0.2, raw_strength / (1 + Math.abs(raw_strength))));
+    
+    // Calculate drives with plays adjustment
     const nh_boost = team.no_huddle * w.NoHuddle * 0.5;
     const ed_adj = (team.ed_pass - 0.5) * w.Pace_EDPass;
     let drives = ((team.off_drives + oppDefense.def_drives) / 2) * (1 + nh_boost + ed_adj);
+    
+    // Plays adjustment (more plays per drive = slightly more drives overall)
+    const plays_avg = (team.off_plays + oppDefense.def_plays) / 2;
+    const plays_adj = (plays_avg - 5.5) / 5.5; // ~[-1, +1] scale
+    const plays_adj_clamped = Math.max(-0.05, Math.min(0.05, plays_adj * 0.08)); // keep to ±5%
+    drives *= (1 + plays_adj_clamped);
 
-    // Apply HFA to drives (affects pace slightly)
-    const hfa_drive_adj = isHome ? 1.02 : 0.98;
+    // Apply HFA to drives (keep pace nearly neutral since logit shift does the heavy lifting)
+    const hfa_drive_adj = isHome ? 1.01 : 0.99;
     drives *= hfa_drive_adj;
-
-    // Plays adjustment
-    const plays_adj = ((team.off_plays + oppDefense.def_plays) / 2 - 5.5) / 5.5 * 0.08;
     
     // Return all the metrics needed for discrete drive simulation
     return {
       drives,
-      epa_net,
-      sr_net,
-      rz_net,
-      opp_3out,
-      net_adv,
-      plays_adj,
+      epa_diff,
+      sr_diff,
+      rz_diff,
+      opp_3out_centered,
+      strength_adj,
       isHome,
-      hfa,
     };
   };
 
@@ -429,9 +457,11 @@ const MonteCarloSimulator = () => {
       let overUnder = null;
       if (marketTotal && !isNaN(parseFloat(marketTotal))) {
         const line = parseFloat(marketTotal);
-        const overs = totals.filter(t => t > line).length;
-        const unders = totals.filter(t => t < line).length;
-        const pushes = totals.filter(t => t === line).length;
+        // Use epsilon for floating-point safety
+        const eps = 1e-9;
+        const overs = totals.filter(t => t > line + eps).length;
+        const unders = totals.filter(t => t < line - eps).length;
+        const pushes = totals.filter(t => Math.abs(t - line) <= eps).length;
         overUnder = {
           line,
           overPct: (overs / numSimulations) * 100,
@@ -485,9 +515,11 @@ const MonteCarloSimulator = () => {
         // Example: Home -3, wins by 3: margin = 3, 3 + (-3) = 0 = push
         // Example: Home -3, wins by 2: margin = 2, 2 + (-3) = -1 < 0 ✗ doesn't cover
         
-        const homeCovers = spreads.filter(s => s + line > 0).length;
-        const awayCovers = spreads.filter(s => s + line < 0).length;
-        const pushes = spreads.filter(s => s + line === 0).length;
+        // Use epsilon for floating-point safety (defensive against float line inputs)
+        const eps = 1e-9;
+        const homeCovers = spreads.filter(s => s + line > eps).length;
+        const awayCovers = spreads.filter(s => s + line < -eps).length;
+        const pushes = spreads.filter(s => Math.abs(s + line) <= eps).length;
         spreadCoverage = {
           line,
           homeCoverPct: (homeCovers / numSimulations) * 100,
