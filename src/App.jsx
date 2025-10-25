@@ -1,3 +1,151 @@
+function simulateGameDiscrete(homeMetrics, awayMetrics, params) {
+  const sigmoid = x => 1 / (1 + Math.exp(-x));
+  const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+  const dm = params.DriveModel ?? { td_b0: -0.85, td_b1: 3.0, td_b2: 0.6, td_b3: 1.2,
+                                    threeOut_a0: -1.10, threeOut_a1: 2.6, threeOut_a2: 0.8, threeOut_a3: 0.9,
+                                    fg_phi: 0.30 };
+  const hfa_logit = (params.hfa ?? 0) / 12;
+
+  // --- DRIVES BUDGETING ---
+  const MIN_TOTAL = 18, MAX_TOTAL = 30;
+  const homeDriveExpect = homeMetrics.drives;
+  const awayDriveExpect = awayMetrics.drives;
+  let totalDrives = Math.round(homeDriveExpect + awayDriveExpect);
+  totalDrives = clamp(totalDrives, MIN_TOTAL, MAX_TOTAL);
+
+  const tilt = clamp((homeDriveExpect - awayDriveExpect) * 0.1, -0.6, 0.6);
+  let homeDrives = Math.round(totalDrives / 2 + tilt);
+  let awayDrives = totalDrives - homeDrives;
+
+  const MIN_D = 9, MAX_D = 15;
+  homeDrives = clamp(homeDrives, MIN_D, MAX_D);
+  awayDrives = totalDrives - homeDrives;
+  if (awayDrives < MIN_D) { awayDrives = MIN_D; homeDrives = totalDrives - awayDrives; }
+  if (awayDrives > MAX_D) { awayDrives = MAX_D; homeDrives = totalDrives - awayDrives; }
+  // Final preservation
+  homeDrives = clamp(homeDrives, MIN_D, MAX_D);
+  awayDrives = totalDrives - homeDrives;
+
+  const playTeam = (metrics, isHome) => {
+    // 3-and-out probability
+    let logit_3out =
+        (dm.threeOut_a0 ?? -1.10) +
+        (dm.threeOut_a1 ?? 2.6) * (-(metrics.epa_diff ?? 0)) +
+        (dm.threeOut_a2 ?? 0.8) * (-(metrics.sr_diff ?? 0)) +
+        (dm.threeOut_a3 ?? 0.9) * (metrics.opp_3out_centered ?? 0) +
+        (metrics.isHome ? -hfa_logit : hfa_logit);
+    const p_3out = sigmoid(clamp(logit_3out, -8, 8));
+
+    // TD given sustain
+    let logit_td =
+        (dm.td_b0 ?? -0.85) +
+        (dm.td_b1 ?? 3.0) * (metrics.epa_diff ?? 0) +
+        (dm.td_b2 ?? 0.6) * (metrics.sr_diff ?? 0) +
+        (dm.td_b3 ?? 1.2) * (metrics.rz_diff ?? 0) +
+        (metrics.strength_adj ?? 0) +
+        (metrics.isHome ? hfa_logit : -hfa_logit);
+    const p_td_given_sustain = sigmoid(clamp(logit_td, -8, 8));
+
+    // FG among non-TD mass with RZ factor bounded
+    const rz_quality_factor = clamp(1 - ((metrics.rz_diff ?? 0) * 0.5), 0.7, 1.3);
+    let p_fg_given_sustain = (dm.fg_phi ?? 0.30) * rz_quality_factor * (1 - p_td_given_sustain);
+    p_fg_given_sustain = Math.max(0, Math.min(1 - p_td_given_sustain, p_fg_given_sustain));
+
+    // Draw drives
+    let pts = 0;
+    const drives = metrics.isHome ? homeDrives : awayDrives;
+    for (let i = 0; i < drives; i++) {
+      const r = Math.random();
+      if (r < p_3out) {
+        continue;
+      } else {
+        const r2 = Math.random();
+        if (r2 < p_td_given_sustain) pts += 7;
+        else if (r2 < p_td_given_sustain + p_fg_given_sustain) pts += 3;
+      }
+    }
+    return pts;
+  };
+
+  const homePts = playTeam({ ...homeMetrics, isHome: true });
+  const awayPts = playTeam({ ...awayMetrics, isHome: false });
+
+  return { homePts, awayPts, margin: homePts - awayPts, total: homePts + awayPts };
+}
+
+function estimateScore(team, oppDefense, params, hfa, isHome) {
+  // Build z-scores / centered diffs
+  const z = (x, mu, sd) => sd > 0 ? (x - mu) / sd : 0;
+
+  // Offense side (already parsed upstream as per your data model)
+  const z_ppd_o = team.off_ppd_z ?? 0;
+  const z_epa_o = team.off_epa_z ?? 0;
+  const z_sr_o  = team.off_sr_z  ?? 0;
+  const z_xpl_o = team.off_xpl_z ?? 0;
+  const z_rz_o  = team.off_rz_z  ?? 0;
+  const z_out_o = team.off_3out_z ?? 0;
+
+  // Defense (opponent) — NOTE: higher allowed stats = worse defense for the offense to face
+  const z_ppd_d = oppDefense.def_ppd_z ?? 0;
+  const z_epa_d = oppDefense.def_epa_z ?? 0;
+  const z_sr_d  = oppDefense.def_sr_z  ?? 0;     // SR allowed (high = bad)
+  const z_xpl_d = oppDefense.def_xpl_z ?? 0;
+  const z_rz_d  = oppDefense.def_rz_z  ?? 0;
+  const z_out_d = oppDefense.def_3out_z ?? 0;    // 3-out rate (high = good defense)
+
+  const w = params.Weights ?? {
+    PPD: 0.25, EPA: 0.40, SR: 0.25, Xpl: 0.10, RZ: 0.05, ThreeOut_eff: 0.35,
+    Pen_off: 0.25, Pen_def: 0.15, DVOA_off: 0.50, DVOA_def: 0.50,
+    Pace_EDPass: 0.10, NoHuddle: 0.20, FP: 0.20, TO_EPA: 0.10
+  };
+
+  // Offense efficiency contribution
+  const eff_o =
+      z_ppd_o * w.PPD +
+      z_epa_o * w.EPA +
+      z_sr_o  * w.SR  +
+      z_xpl_o * w.Xpl +
+      z_rz_o  * w.RZ  -
+      z_out_o * w.ThreeOut_eff;
+
+  // Defense (opponent) contribution — signs chosen so "high=bad" helps the offense
+  const eff_d =
+      z_ppd_d * w.PPD +
+      z_epa_d * w.EPA +
+      z_sr_d  * w.SR  +         // SR allowed ↑ (worse) → offense advantage ↑
+      z_xpl_d * w.Xpl +
+      z_rz_d  * w.RZ  +
+      (-z_out_d * w.ThreeOut_eff); // 3-out rate ↑ (better D) → offense disadvantage
+
+  // Penalties & DVOA
+  const pen_adj = (team.off_pen_z ?? 0) * w.Pen_off + (oppDefense.def_pen_z ?? 0) * w.Pen_def;
+  const dvoa_adj = ( (team.off_dvoa ?? 0) / 100 ) * (w.DVOA_off ?? 0.5) +
+                   ( (oppDefense.def_dvoa ?? 0) / 100 ) * (w.DVOA_def ?? 0.5);
+
+  // Field position & turnovers (optional; zero-safe)
+  const fp_adj = ((team.off_fp_z ?? 0) * (w.FP ?? 0.2));
+  const to_adj = ((team.off_to_epa_z ?? 0) * (w.TO_EPA ?? 0.1));
+
+  // Aggregate into diffs for drive logits
+  const epa_diff = (team.off_epa_z ?? 0) - (oppDefense.def_epa_z ?? 0);
+  const sr_diff  = (team.off_sr_z  ?? 0) - (oppDefense.def_sr_z  ?? 0);
+  const rz_diff  = (team.off_rz_z  ?? 0) - (oppDefense.def_rz_z  ?? 0);
+
+  // Opponent 3-out rate centered (higher → more 3-outs for offense)
+  const opp_3out_centered = (oppDefense.def_3out_z ?? 0);
+
+  // Net advantage (used to shape strength)
+  const base_adv = eff_o + eff_d + pen_adj + dvoa_adj + fp_adj + to_adj;
+  const raw_strength = base_adv * 0.12;
+  const strength_adj = Math.max(-0.2, Math.min(0.2, raw_strength / (1 + Math.abs(raw_strength))));
+
+  return {
+    drives: (team.off_drives ?? 11),     // upstream pace calc
+    epa_diff, sr_diff, rz_diff, opp_3out_centered,
+    strength_adj, isHome, hfa
+  };
+}
+
 import React, { useState } from "react";
 import { Upload, Play, BarChart3, TrendingUp, Settings } from "lucide-react";
 
@@ -221,9 +369,6 @@ const MonteCarloSimulator = () => {
       off_plays: parseNum(r["Off Plays/Drive"], 6), // Plays - regular number
       def_plays: parseNum(r["Def Plays/Drive Allowed"], 6), // Plays - regular number
       // HFA removed - will only use slider adjustment
-    };
-  };
-
   const zScore = (val, mean, sd) => (val - mean) / sd;
 
   // Sigmoid function for logistic regression
@@ -293,134 +438,6 @@ const MonteCarloSimulator = () => {
   };
 
   // Simulate full game with discrete drives
-  const simulateGameDiscrete = (homeMetrics, awayMetrics, hfa) => {
-    // Total possessions ~ sum of team expectations (keeps league PPD honest)
-    let totalDrives = Math.round(homeMetrics.drives + awayMetrics.drives);
-    // Keep total drives within a realistic league window so per-team caps are satisfiable
-    const MIN_TOTAL = 18, MAX_TOTAL = 30;
-    totalDrives = Math.max(MIN_TOTAL, Math.min(MAX_TOTAL, totalDrives));
-    
-    // Small pace tilt to the faster team (bounded)
-    const tilt = Math.max(-0.6, Math.min(0.6, (homeMetrics.drives - awayMetrics.drives) * 0.1));
-    let homeDrives = Math.round(totalDrives / 2 + tilt);
-    let awayDrives = totalDrives - homeDrives; // preserve total
-    
-    // Safety bounds with total preservation
-    const MIN_D = 9, MAX_D = 15;
-    homeDrives = Math.max(MIN_D, Math.min(MAX_D, homeDrives));
-    awayDrives = totalDrives - homeDrives;
-    if (awayDrives < MIN_D) { awayDrives = MIN_D; homeDrives = totalDrives - awayDrives; }
-    if (awayDrives > MAX_D) { awayDrives = MAX_D; homeDrives = totalDrives - awayDrives; }
-    
-    let homeScore = 0;
-    let awayScore = 0;
-    
-    // Simulate home team's drives
-    for (let d = 0; d < homeDrives; d++) {
-      const result = simulateDrive(homeMetrics, hfa);
-      homeScore += result.score;
-    }
-    
-    // Simulate away team's drives
-    for (let d = 0; d < awayDrives; d++) {
-      const result = simulateDrive(awayMetrics, hfa);
-      awayScore += result.score;
-    }
-    
-    return { homeScore, awayScore };
-  };
-
-  const estimateScore = (team, oppDefense, isHome, hfa) => {
-    const lg = params.lg;
-    const w = params.weights;
-
-    // Offensive metrics (z-scores)
-    const z_ppd_o = zScore(team.off_ppd, lg.PPD, lg.PPD_sd);
-    const z_epa_o = zScore(team.off_epa, lg.EPA, lg.EPA_sd);
-    const z_sr_o = zScore(team.off_sr, lg.SR, lg.SR_sd);
-    const z_xpl_o = zScore(team.off_xpl, lg.Xpl, lg.Xpl_sd);
-    const z_rz_o = zScore(team.off_rz, lg.RZ, lg.RZ_sd);
-    const z_out_o = zScore(team.off_3out, lg.ThreeOut, lg.ThreeOut_sd);
-
-    // Defensive metrics (opponent defense)
-    const z_ppd_d = zScore(oppDefense.def_ppd_allowed, lg.PPD, lg.PPD_sd);
-    const z_epa_d = zScore(oppDefense.def_epa_allowed, lg.EPA, lg.EPA_sd);
-    const z_sr_d = zScore(oppDefense.def_sr, lg.SR, lg.SR_sd);
-    const z_xpl_d = zScore(oppDefense.def_xpl, lg.Xpl, lg.Xpl_sd);
-    const z_rz_d = zScore(oppDefense.def_rz, lg.RZ, lg.RZ_sd);
-    const z_out_d = zScore(oppDefense.def_3out, lg.ThreeOut, lg.ThreeOut_sd);
-
-    // Penalties
-    const z_pen_o = zScore(team.off_penalties, lg.Pen, lg.Pen_sd);
-    const z_pen_d = zScore(oppDefense.def_penalties, lg.Pen, lg.Pen_sd);
-
-    // Efficiency scores
-    const eff_o =
-      z_ppd_o * w.PPD +
-      z_epa_o * w.EPA +
-      z_sr_o * w.SR +
-      z_xpl_o * w.Xpl +
-      z_rz_o * w.RZ -
-      z_out_o * w.ThreeOut_eff;
-
-    const eff_d =
-      z_ppd_d * w.PPD +
-      z_epa_d * w.EPA +
-      z_sr_d * w.SR +          // SR allowed ↑ → offense advantage ↑
-      z_xpl_d * w.Xpl +
-      z_rz_d * w.RZ +
-      (-z_out_d * w.ThreeOut_eff); // 3-out rate ↑ → better defense → offense disadvantage
-
-    // Additional adjustments
-    const dvoa_adj = (team.off_dvoa / 100) * w.DVOA_off + (oppDefense.def_dvoa / 100) * w.DVOA_def;
-    const to_adj = (team.off_to_epa * w.TO_EPA) / lg.Drives;
-    const fp_adj = ((team.off_fp - 25) / 10) * w.FP * 0.1;
-    const pen_adj = (-z_pen_o * w.Pen + z_pen_d * w.Pen_def) * 0.05;
-
-    // Net advantage
-    const net_adv = (eff_o + eff_d) / 2 + dvoa_adj + to_adj + fp_adj + pen_adj;
-    
-    // Calculate matchup-specific raw differentials (NOT z-scores)
-    const epa_diff = team.off_epa - oppDefense.def_epa_allowed;
-    const sr_diff = team.off_sr - oppDefense.def_sr;
-    const rz_diff = team.off_rz - oppDefense.def_rz;
-    
-    // Opponent 3-out rate (centered around league average)
-    const opp_3out_centered = oppDefense.def_3out - lg.ThreeOut; // ~0 at league-average
-    
-    // Apply net advantage as a logit adjustment with soft-shrink
-    // Large edges get proportionally smaller bumps to prevent blowouts
-    // This wires in DVOA, penalties, turnovers, FP
-    const raw_strength = net_adv * 0.12;
-    const strength_adj = Math.max(-0.2, Math.min(0.2, raw_strength / (1 + Math.abs(raw_strength))));
-    
-    // Calculate drives with plays adjustment
-    const nh_boost = team.no_huddle * w.NoHuddle * 0.5;
-    const ed_adj = (team.ed_pass - 0.5) * w.Pace_EDPass;
-    let drives = ((team.off_drives + oppDefense.def_drives) / 2) * (1 + nh_boost + ed_adj);
-    
-    // Plays adjustment (more plays per drive = slightly more drives overall)
-    const plays_avg = (team.off_plays + oppDefense.def_plays) / 2;
-    const plays_adj = (plays_avg - 5.5) / 5.5; // ~[-1, +1] scale
-    const plays_adj_clamped = Math.max(-0.05, Math.min(0.05, plays_adj * 0.08)); // keep to ±5%
-    drives *= (1 + plays_adj_clamped);
-
-    // Apply HFA to drives (keep pace nearly neutral since logit shift does the heavy lifting)
-    const hfa_drive_adj = isHome ? 1.01 : 0.99;
-    drives *= hfa_drive_adj;
-    
-    // Return all the metrics needed for discrete drive simulation
-    return {
-      drives,
-      epa_diff,
-      sr_diff,
-      rz_diff,
-      opp_3out_centered,
-      strength_adj,
-      isHome,
-    };
-  };
-
   const runMonteCarloSimulation = () => {
     if (!homeTeam || !awayTeam) {
       alert("Please select both home and away teams");
@@ -439,8 +456,8 @@ const MonteCarloSimulator = () => {
       const effectiveHFA = hfaAdjustment;
 
       // Calculate projections (now returns drive metrics instead of point estimates)
-      const homeMetrics = estimateScore(homeData, awayData, true, effectiveHFA);
-      const awayMetrics = estimateScore(awayData, homeData, false, effectiveHFA);
+      const homeMetrics = estimateScore(homeData, awayData, params, effectiveHFA, true);
+      const awayMetrics = estimateScore(awayData, homeData, params, effectiveHFA, false);
 
       const homeScores = [];
       const awayScores = [];
@@ -449,12 +466,12 @@ const MonteCarloSimulator = () => {
 
       // Run discrete drive simulations
       for (let i = 0; i < numSimulations; i++) {
-        const game = simulateGameDiscrete(homeMetrics, awayMetrics, effectiveHFA);
+        const game = simulateGameDiscrete(homeMetrics, awayMetrics, { ...params, hfa: effectiveHFA });
         
-        homeScores.push(game.homeScore);
-        awayScores.push(game.awayScore);
-        totals.push(game.homeScore + game.awayScore);
-        spreads.push(game.homeScore - game.awayScore);
+        homeScores.push(game.homePts);
+        awayScores.push(game.awayPts);
+        totals.push(game.total);
+        spreads.push(game.homePts - game.awayPts);
       }
 
       // Calculate statistics
@@ -579,8 +596,8 @@ const MonteCarloSimulator = () => {
         home: {
           mean: mean(homeScores),
           median: median(homeScores),
-          min: Math.min(...homeScores),
-          max: Math.max(...homeScores),
+          min: Math.min(...homePtss),
+          max: Math.max(...homePtss),
           p10: percentile(homeScores, 0.1),
           p25: percentile(homeScores, 0.25),
           p75: percentile(homeScores, 0.75),
@@ -590,8 +607,8 @@ const MonteCarloSimulator = () => {
         away: {
           mean: mean(awayScores),
           median: median(awayScores),
-          min: Math.min(...awayScores),
-          max: Math.max(...awayScores),
+          min: Math.min(...awayPtss),
+          max: Math.max(...awayPtss),
           p10: percentile(awayScores, 0.1),
           p25: percentile(awayScores, 0.25),
           p75: percentile(awayScores, 0.75),
