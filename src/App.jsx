@@ -344,11 +344,11 @@ const MonteCarloSimulator = () => {
 
     const eff_d =
       z_ppd_d * w.PPD +
-      z_epa_d * w.EPA -
-      z_sr_d * w.SR +
+      z_epa_d * w.EPA +
+      z_sr_d * w.SR +          // SR allowed ↑ → offense advantage ↑
       z_xpl_d * w.Xpl +
-      z_rz_d * w.RZ -
-      z_out_d * w.ThreeOut_eff;
+      z_rz_d * w.RZ +
+      (-z_out_d * w.ThreeOut_eff); // 3-out rate ↑ → better defense → offense disadvantage
 
     // Additional adjustments
     const dvoa_adj = (team.off_dvoa / 100) * w.DVOA_off + (oppDefense.def_dvoa / 100) * w.DVOA_def;
