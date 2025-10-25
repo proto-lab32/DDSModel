@@ -38,22 +38,20 @@ const MonteCarloSimulator = () => {
     },
     // Discrete drive model calibration parameters
     driveModel: {
-      // 3-and-out logit: p_3O = σ(a0 - a1·EPA_net - a2·SR_net + a3·Opp_3O + a4·RZ_bad)
-      threeOut_a0: -1.05,     // Baseline intercept (~24% 3-out rate)
-      threeOut_a1: 0.8,       // EPA coefficient (better EPA → fewer 3-outs)
-      threeOut_a2: 0.6,       // SR coefficient (better SR → fewer 3-outs)
-      threeOut_a3: 0.4,       // Opponent 3-out pressure
-      threeOut_a4: 0.3,       // Red zone weakness penalty
+      // 3-and-out logit: p_3O = σ(a0 - a1·EPA_net - a2·SR_net + a3·Opp_3O)
+      threeOut_a0: -1.20,     // Baseline intercept (~23% 3-out rate)
+      threeOut_a1: 1.5,       // EPA coefficient (better EPA → fewer 3-outs)
+      threeOut_a2: 1.2,       // SR coefficient (better SR → fewer 3-outs)
+      threeOut_a3: 0.8,       // Opponent 3-out pressure
       
-      // TD|sustain logit: p_TD = σ(b0 + b1·EPA_net + b2·SR_net + b3·RZ_net + b4·PPD_resid)
-      td_b0: -1.15,           // Baseline intercept (~24% TD rate when sustained)
-      td_b1: 0.7,             // EPA coefficient
-      td_b2: 0.5,             // SR coefficient
-      td_b3: 0.9,             // RZ coefficient (most important for TDs)
-      td_b4: 0.4,             // PPD residual
+      // TD|sustain logit: p_TD = σ(b0 + b1·EPA_net + b2·SR_net + b3·RZ_net)
+      td_b0: -1.20,           // Baseline intercept (~23% TD rate when sustained)
+      td_b1: 1.0,             // EPA coefficient
+      td_b2: 0.8,             // SR coefficient
+      td_b3: 1.5,             // RZ coefficient (most important for TDs)
       
       // FG bias: p_FG|sustain = φ · (1 - p_TD|sustain)
-      fg_phi: 0.55,           // ~55% of non-TD sustained drives → FG (~18% overall)
+      fg_phi: 0.50,           // ~50% of non-TD sustained drives → FG
     },
     weights: {
       PPD: 0.25,
@@ -215,23 +213,21 @@ const MonteCarloSimulator = () => {
   const simulateDrive = (metrics, hfa) => {
     const dm = params.driveModel;
     
-    // Apply HFA to metrics (25% home boost, 75% away penalty split)
-    const hfa_factor = metrics.isHome 
-      ? 1 + (hfa / 100) * 0.25 
-      : 1 - (hfa / 100) * 0.75;
+    // Apply HFA as an additive adjustment to the net metrics
+    // Positive HFA helps home team, negative helps away team
+    const hfa_adjustment = metrics.isHome ? (hfa / 30) : -(hfa / 30); // Scale HFA to ~0.1-0.3 logit units per point
     
     // Adjusted metrics with HFA
-    const epa_adj = metrics.epa_net * hfa_factor;
-    const sr_adj = metrics.sr_net * hfa_factor;
-    const rz_adj = metrics.rz_net * hfa_factor;
+    const epa_adj = metrics.epa_net + hfa_adjustment;
+    const sr_adj = metrics.sr_net + hfa_adjustment;
+    const rz_adj = metrics.rz_net + hfa_adjustment;
     
     // 1. Sample 3-and-out probability
     const logit_3out = 
       dm.threeOut_a0 - 
       dm.threeOut_a1 * epa_adj - 
       dm.threeOut_a2 * sr_adj + 
-      dm.threeOut_a3 * metrics.opp_3out + 
-      dm.threeOut_a4 * metrics.rz_bad;
+      dm.threeOut_a3 * metrics.opp_3out;
     
     const p_3out = sigmoid(logit_3out);
     
@@ -245,8 +241,7 @@ const MonteCarloSimulator = () => {
       dm.td_b0 + 
       dm.td_b1 * epa_adj + 
       dm.td_b2 * sr_adj + 
-      dm.td_b3 * rz_adj + 
-      dm.td_b4 * metrics.ppd_resid;
+      dm.td_b3 * rz_adj;
     
     const p_td_given_sustain = sigmoid(logit_td);
     const p_fg_given_sustain = dm.fg_phi * (1 - p_td_given_sustain);
@@ -264,12 +259,14 @@ const MonteCarloSimulator = () => {
 
   // Simulate full game with discrete drives
   const simulateGameDiscrete = (homeMetrics, awayMetrics, hfa) => {
-    // Total drives in game (shared between both teams)
-    const totalDrives = Math.round((homeMetrics.drives + awayMetrics.drives) / 2);
+    // Total drives in game - use average drives per team (each team gets ~11-12 possessions)
+    // So total possessions to simulate is roughly the average
+    const avgDrivesPerTeam = (homeMetrics.drives + awayMetrics.drives) / 2;
+    const totalDrives = Math.round(avgDrivesPerTeam);
     
     // Possession share based on pace differential
     const pace_diff = homeMetrics.drives - awayMetrics.drives;
-    const home_share = 0.5 + (pace_diff / totalDrives) * 0.1; // Small adjustment
+    const home_share = 0.5 + (pace_diff / (avgDrivesPerTeam * 2)) * 0.15; // Small adjustment
     
     let homeScore = 0;
     let awayScore = 0;
@@ -346,15 +343,8 @@ const MonteCarloSimulator = () => {
     const sr_net = z_sr_o - z_sr_d;
     const rz_net = z_rz_o - z_rz_d;
     
-    // PPD residual (difference from expected based on efficiency)
-    const expected_ppd = lg.PPD + net_adv * lg.PPD_sd;
-    const ppd_resid = team.off_ppd - expected_ppd;
-    
     // Opponent 3-out pressure (defensive 3-out force rate)
     const opp_3out = z_out_d;
-    
-    // RZ weakness (low red zone % is bad)
-    const rz_bad = -z_rz_o;
     
     // Calculate drives
     const nh_boost = team.no_huddle * w.NoHuddle * 0.5;
@@ -374,9 +364,7 @@ const MonteCarloSimulator = () => {
       epa_net,
       sr_net,
       rz_net,
-      ppd_resid,
       opp_3out,
-      rz_bad,
       net_adv,
       plays_adj,
       isHome,
