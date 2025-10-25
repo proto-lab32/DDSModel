@@ -1,7 +1,7 @@
 function simulateGameDiscrete(homeMetrics, awayMetrics, params) {
   const sigmoid = x => 1 / (1 + Math.exp(-x));
   const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
-  const dm = params.DriveModel ?? { td_b0: -0.85, td_b1: 3.0, td_b2: 0.6, td_b3: 1.2,
+  const dm = params.driveModel ?? { td_b0: -0.85, td_b1: 3.0, td_b2: 0.6, td_b3: 1.2,
                                     threeOut_a0: -1.10, threeOut_a1: 2.6, threeOut_a2: 0.8, threeOut_a3: 0.9,
                                     fg_phi: 0.30 };
   const hfa_logit = (params.hfa ?? 0) / 12;
@@ -32,7 +32,7 @@ function simulateGameDiscrete(homeMetrics, awayMetrics, params) {
         (dm.threeOut_a0 ?? -1.10) +
         (dm.threeOut_a1 ?? 2.6) * (-(metrics.epa_diff ?? 0)) +
         (dm.threeOut_a2 ?? 0.8) * (-(metrics.sr_diff ?? 0)) +
-        (dm.threeOut_a3 ?? 0.9) * (metrics.opp_3out_centered ?? 0) +
+        (dm.threeOut_a3 ?? 0.9) * (metrics.opp_3out_centered ?? 0) +  // z-score of opponent 3&O rate
         (metrics.isHome ? -hfa_logit : hfa_logit);
     const p_3out = sigmoid(clamp(logit_3out, -8, 8));
 
@@ -74,73 +74,76 @@ function simulateGameDiscrete(homeMetrics, awayMetrics, params) {
 }
 
 function estimateScore(team, oppDefense, params, hfa, isHome) {
-  // Build z-scores / centered diffs
-  const z = (x, mu, sd) => sd > 0 ? (x - mu) / sd : 0;
+  const z = (x, mu, sd) => (sd && sd > 0) ? (x - mu) / sd : 0;
+  const lg = params.lg ?? {};
 
-  // Offense side (already parsed upstream as per your data model)
-  const z_ppd_o = team.off_ppd_z ?? 0;
-  const z_epa_o = team.off_epa_z ?? 0;
-  const z_sr_o  = team.off_sr_z  ?? 0;
-  const z_xpl_o = team.off_xpl_z ?? 0;
-  const z_rz_o  = team.off_rz_z  ?? 0;
-  const z_out_o = team.off_3out_z ?? 0;
+  // --- Offense raw -> z ---
+  const z_ppd_o = z(team.off_ppd ?? lg.PPD, lg.PPD, lg.PPD_sd);
+  const z_epa_o = z(team.off_epa ?? lg.EPA, lg.EPA, lg.EPA_sd);
+  const z_sr_o  = z(team.off_sr  ?? lg.SR,  lg.SR,  lg.SR_sd);
+  const z_xpl_o = z(team.off_xpl ?? lg.Xpl, lg.Xpl, lg.Xpl_sd);
+  const z_rz_o  = z(team.off_rz  ?? lg.RZ,  lg.RZ,  lg.RZ_sd);
+  const z_out_o = z(team.off_3out ?? lg.ThreeOut, lg.ThreeOut, lg.ThreeOut_sd);
 
-  // Defense (opponent) — NOTE: higher allowed stats = worse defense for the offense to face
-  const z_ppd_d = oppDefense.def_ppd_z ?? 0;
-  const z_epa_d = oppDefense.def_epa_z ?? 0;
-  const z_sr_d  = oppDefense.def_sr_z  ?? 0;     // SR allowed (high = bad)
-  const z_xpl_d = oppDefense.def_xpl_z ?? 0;
-  const z_rz_d  = oppDefense.def_rz_z  ?? 0;
-  const z_out_d = oppDefense.def_3out_z ?? 0;    // 3-out rate (high = good defense)
+  // --- Defense allowed raw -> z ---
+  // Note: higher allowed = "worse defense" so sign handling comes later in eff terms
+  const z_ppd_d = z(oppDefense.def_ppd_allowed ?? lg.PPD, lg.PPD, lg.PPD_sd);
+  const z_epa_d = z(oppDefense.def_epa_allowed ?? lg.EPA, lg.EPA, lg.EPA_sd);
+  const z_sr_d  = z(oppDefense.def_sr ?? lg.SR, lg.SR, lg.SR_sd);
+  const z_xpl_d = z(oppDefense.def_xpl ?? lg.Xpl, lg.Xpl, lg.Xpl_sd);
+  const z_rz_d  = z(oppDefense.def_rz ?? lg.RZ, lg.RZ, lg.RZ_sd);
+  const z_out_d = z(oppDefense.def_3out ?? lg.ThreeOut, lg.ThreeOut, lg.ThreeOut_sd);
 
-  const w = params.Weights ?? {
+  const w = params.weights ?? {
     PPD: 0.25, EPA: 0.40, SR: 0.25, Xpl: 0.10, RZ: 0.05, ThreeOut_eff: 0.35,
     Pen_off: 0.25, Pen_def: 0.15, DVOA_off: 0.50, DVOA_def: 0.50,
     Pace_EDPass: 0.10, NoHuddle: 0.20, FP: 0.20, TO_EPA: 0.10
   };
 
-  // Offense efficiency contribution
+  // Offense efficiency (good ↑)
   const eff_o =
-      z_ppd_o * w.PPD +
-      z_epa_o * w.EPA +
-      z_sr_o  * w.SR  +
-      z_xpl_o * w.Xpl +
-      z_rz_o  * w.RZ  -
-      z_out_o * w.ThreeOut_eff;
+    z_ppd_o * w.PPD +
+    z_epa_o * w.EPA +
+    z_sr_o  * w.SR  +
+    z_xpl_o * w.Xpl +
+    z_rz_o  * w.RZ  -
+    z_out_o * w.ThreeOut_eff;
 
-  // Defense (opponent) contribution — signs chosen so "high=bad" helps the offense
+  // Defense effect on the offense: higher allowed → easier → positive
   const eff_d =
-      z_ppd_d * w.PPD +
-      z_epa_d * w.EPA +
-      z_sr_d  * w.SR  +         // SR allowed ↑ (worse) → offense advantage ↑
-      z_xpl_d * w.Xpl +
-      z_rz_d  * w.RZ  +
-      (-z_out_d * w.ThreeOut_eff); // 3-out rate ↑ (better D) → offense disadvantage
+    z_ppd_d * w.PPD +
+    z_epa_d * w.EPA +
+    z_sr_d  * w.SR  +
+    z_xpl_d * w.Xpl +
+    z_rz_d  * w.RZ  +
+    (-z_out_d * w.ThreeOut_eff); // higher 3&O rate (good D) hurts O
 
-  // Penalties & DVOA
-  const pen_adj = (team.off_pen_z ?? 0) * w.Pen_off + (oppDefense.def_pen_z ?? 0) * w.Pen_def;
-  const dvoa_adj = ( (team.off_dvoa ?? 0) / 100 ) * (w.DVOA_off ?? 0.5) +
-                   ( (oppDefense.def_dvoa ?? 0) / 100 ) * (w.DVOA_def ?? 0.5);
+  // Penalties & DVOA (keep DVOA on its native % points scale)
+  const pen_adj = z(team.off_penalties ?? lg.Pen, lg.Pen, lg.Pen_sd) * (w.Pen_off ?? w.Pen ?? 0.25)
+                + z(oppDefense.def_penalties ?? lg.Pen, lg.Pen, lg.Pen_sd) * (w.Pen_def ?? 0.15);
 
-  // Field position & turnovers (optional; zero-safe)
-  const fp_adj = ((team.off_fp_z ?? 0) * (w.FP ?? 0.2));
-  const to_adj = ((team.off_to_epa_z ?? 0) * (w.TO_EPA ?? 0.1));
+  const dvoa_adj =
+    ( (team.off_dvoa ?? 0) / 100 ) * (w.DVOA_off ?? 0.5) +
+    ( (oppDefense.def_dvoa ?? 0) / 100 ) * (w.DVOA_def ?? 0.5);
 
-  // Aggregate into diffs for drive logits
-  const epa_diff = (team.off_epa_z ?? 0) - (oppDefense.def_epa_z ?? 0);
-  const sr_diff  = (team.off_sr_z  ?? 0) - (oppDefense.def_sr_z  ?? 0);
-  const rz_diff  = (team.off_rz_z  ?? 0) - (oppDefense.def_rz_z  ?? 0);
+  const fp_adj = z(team.off_fp ?? 25, 25, 5) * (w.FP ?? 0.2);            // loose baseline
+  const to_adj = (team.off_to_epa ?? 0) * (w.TO_EPA ?? 0.1);             // already EPA-ish
 
-  // Opponent 3-out rate centered (higher → more 3-outs for offense)
-  const opp_3out_centered = (oppDefense.def_3out_z ?? 0);
+  // Diffs that feed the drive logits
+  const epa_diff = z_epa_o - z_epa_d;
+  const sr_diff  = z_sr_o  - z_sr_d;
+  const rz_diff  = z_rz_o  - z_rz_d;
 
-  // Net advantage (used to shape strength)
+  // Opponent 3&O as "hardness" term (positive = tougher)
+  const opp_3out_centered = z_out_d;
+
+  // Net advantage scaled → bounded strength term (kept small)
   const base_adv = eff_o + eff_d + pen_adj + dvoa_adj + fp_adj + to_adj;
   const raw_strength = base_adv * 0.12;
   const strength_adj = Math.max(-0.2, Math.min(0.2, raw_strength / (1 + Math.abs(raw_strength))));
 
   return {
-    drives: (team.off_drives ?? 11),     // upstream pace calc
+    drives: (team.off_drives ?? 11),
     epa_diff, sr_diff, rz_diff, opp_3out_centered,
     strength_adj, isHome, hfa
   };
@@ -370,11 +373,6 @@ const MonteCarloSimulator = () => {
       def_plays: parseNum(r["Def Plays/Drive Allowed"], 6) // Plays - regular number (no comma on last item)
     };
   };
-
-  const zScore = (val, mean, sd) => (val - mean) / sd;
-
-  // Sigmoid function for logistic regression
-  const sigmoid = (x) => 1 / (1 + Math.exp(-x));
 
   // Simulate full game with discrete drives
   const runMonteCarloSimulation = () => {
