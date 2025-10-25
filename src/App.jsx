@@ -26,7 +26,7 @@ function simulateGameDiscrete(homeMetrics, awayMetrics, params) {
   homeDrives = clamp(homeDrives, MIN_D, MAX_D);
   awayDrives = totalDrives - homeDrives;
 
-  const playTeam = (metrics, isHome) => {
+  const playTeam = (metrics) => {
     // 3-and-out probability
     let logit_3out =
         (dm.threeOut_a0 ?? -1.10) +
@@ -367,77 +367,14 @@ const MonteCarloSimulator = () => {
       no_huddle: parsePct(r["No-Huddle %"], 0), // No-huddle % - percentage
       ed_pass: parsePct(r["Neutral Early-Down Pass %"], 0.5), // Pass % - percentage
       off_plays: parseNum(r["Off Plays/Drive"], 6), // Plays - regular number
-      def_plays: parseNum(r["Def Plays/Drive Allowed"], 6)} // Plays - regular number
+      def_plays: parseNum(r["Def Plays/Drive Allowed"], 6) // Plays - regular number (no comma on last item)
+    };
   };
-};
-// HFA removed - will only use slider adjustment
+
   const zScore = (val, mean, sd) => (val - mean) / sd;
 
   // Sigmoid function for logistic regression
   const sigmoid = (x) => 1 / (1 + Math.exp(-x));
-
-  // Simulate a single drive outcome: returns {score: 0|3|7, outcome: '3out'|'FG'|'TD'}
-  const simulateDrive = (metrics, hfa) => {
-    const dm = params.driveModel;
-    
-    // HFA has two components:
-    // 1. Direct logit shift (primary effect): ~0.083 per point of HFA
-    const hfa_logit = hfa / 12; // 3-point HFA = 0.25 logit adjustment
-    
-    // 2. Pace adjustment (handled in drive count calculation)
-    // No need to adjust differentials - the logit shift handles skill expression
-    
-    // Use raw differentials without HFA nudging
-    const epa_diff = metrics.epa_diff;
-    const sr_diff = metrics.sr_diff;
-    const rz_diff = metrics.rz_diff;
-    
-    // 1. Sample 3-and-out probability
-    // Apply HFA logit shift (home team gets advantage, away team gets penalty)
-    const logit_3out = 
-      dm.threeOut_a0 - 
-      dm.threeOut_a1 * epa_diff - 
-      dm.threeOut_a2 * sr_diff + 
-      dm.threeOut_a3 * metrics.opp_3out_centered - // Centered around league avg
-      (metrics.isHome ? hfa_logit : -hfa_logit); // Home advantage → fewer 3-outs
-    
-    const p_3out = sigmoid(Math.max(-8, Math.min(8, logit_3out)));
-    
-    // Roll for 3-and-out
-    if (Math.random() < p_3out) {
-      return { score: 0, outcome: '3out' };
-    }
-    
-    // 2. Drive sustained - now sample TD vs FG vs Empty
-    const logit_td = 
-      dm.td_b0 + 
-      dm.td_b1 * epa_diff + 
-      dm.td_b2 * sr_diff + 
-      dm.td_b3 * rz_diff +
-      metrics.strength_adj + // Better teams → more TDs
-      (metrics.isHome ? hfa_logit : -hfa_logit); // Home advantage → more TDs
-    
-    const p_td_given_sustain = sigmoid(Math.max(-8, Math.min(8, logit_td)));
-    
-    // Adjust FG probability based on red zone quality
-    // Better RZ teams score more TDs, leaving fewer non-TD drives for FGs/empties
-    // Worse RZ teams have more failed TD attempts → more FGs and turnovers
-    // Keep RZ effect bounded so FGs don't explode or vanish
-    const rz_quality_factor = Math.min(1.3, Math.max(0.7, 1 - (rz_diff * 0.5)));
-    let p_fg_given_sustain = dm.fg_phi * rz_quality_factor * (1 - p_td_given_sustain);
-    // Clamp FG probability to available non-TD mass
-    p_fg_given_sustain = Math.max(0, Math.min(1 - p_td_given_sustain, p_fg_given_sustain));
-    
-    // Roll for outcome (TD, FG, or Empty)
-    const r = Math.random();
-    if (r < p_td_given_sustain) {
-      return { score: 7, outcome: 'TD' };
-    } else if (r < p_td_given_sustain + p_fg_given_sustain) {
-      return { score: 3, outcome: 'FG' };
-    } else {
-      return { score: 0, outcome: 'Empty' };
-    }
-  };
 
   // Simulate full game with discrete drives
   const runMonteCarloSimulation = () => {
@@ -1073,5 +1010,6 @@ const MonteCarloSimulator = () => {
       </div>
     </div>
   );
+};
 
 export default MonteCarloSimulator;
