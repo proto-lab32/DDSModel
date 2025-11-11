@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useState } from 'react'
-import { Upload, BarChart3, CloudWind, CloudRain, Sun, Thermometer, Play } from 'lucide-react'
+import { Upload, BarChart3, Wind, CloudRain, Sun, Thermometer, Play } from 'lucide-react'
 
 /**
  * NFL Totals Simulator – HYBRID
@@ -528,7 +528,7 @@ export default function NFLTotalsHybrid() {
             </div>
 
             <div className="bg-slate-800/60 rounded-xl border border-slate-700 p-5">
-              <h3 className="text-base font-semibold mb-4 flex items-center gap-2"><CloudWind className="w-5 h-5"/> Weather (post‑hoc)</h3>
+             <h3 className="text-base font-semibold mb-4 flex items-center gap-2"><Wind className="w-5 h-5"/> Weather (post-hoc)</h3>
               <div className="grid grid-cols-2 gap-3">
                 <label className="flex items-center gap-2 col-span-2">
                   <input type="checkbox" checked={weather.isDome} onChange={(e)=>setWeather({...weather, isDome: e.target.checked})}/>
