@@ -795,32 +795,81 @@ const NFLTotalsSimulator = () => {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-8">
+    <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 text-white p-8">
       <div className="max-w-7xl mx-auto">
-        {/* Header */}
-        <div className="mb-8 text-center">
-          <h1 className="text-5xl font-bold mb-4 bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
-            NFL Totals Monte Carlo Simulator
-          </h1>
-          <p className="text-slate-300 text-lg">Contextual Lambda (0.92-0.96) • Wind Threshold 12mph • Heteroskedastic Noise</p>
+        {/* Header - Gamble-Tron Style */}
+        <div className="text-center py-8 mb-8">
+          <div className="inline-block bg-gradient-to-b from-gray-300 to-gray-400 p-6 rounded-lg border-4 border-gray-500 shadow-2xl mb-4">
+            <h1 className="text-6xl font-bold mb-1 text-black tracking-wider" style={{ 
+              fontFamily: 'Impact, "Arial Black", sans-serif',
+              textShadow: '3px 3px 0px rgba(0,0,0,0.3)',
+              letterSpacing: '0.1em'
+            }}>
+              GAMBLE-TRON
+            </h1>
+            <div className="text-5xl font-bold text-black tracking-widest" style={{ 
+              fontFamily: 'Impact, "Arial Black", sans-serif',
+              letterSpacing: '0.3em'
+            }}>
+              2025
+            </div>
+          </div>
+          
+          {/* Spinning Reels */}
+          <div className="flex justify-center gap-64 mt-6 mb-4">
+            <div className="relative">
+              <div className="w-16 h-16 rounded-full border-4 border-gray-800 bg-gradient-to-br from-gray-500 to-gray-700 flex items-center justify-center animate-spin shadow-lg" style={{ animationDuration: '3s' }}>
+                <div className="w-4 h-4 bg-gray-900 rounded-full"></div>
+                <div className="absolute w-1 h-12 bg-gray-800 top-2" style={{ transform: 'rotate(45deg)' }}></div>
+                <div className="absolute w-1 h-12 bg-gray-800 top-2" style={{ transform: 'rotate(-45deg)' }}></div>
+              </div>
+            </div>
+            <div className="relative">
+              <div className="w-16 h-16 rounded-full border-4 border-gray-800 bg-gradient-to-br from-gray-500 to-gray-700 flex items-center justify-center animate-spin shadow-lg" style={{ animationDuration: '3s', animationDirection: 'reverse' }}>
+                <div className="w-4 h-4 bg-gray-900 rounded-full"></div>
+                <div className="absolute w-1 h-12 bg-gray-800 top-2" style={{ transform: 'rotate(45deg)' }}></div>
+                <div className="absolute w-1 h-12 bg-gray-800 top-2" style={{ transform: 'rotate(-45deg)' }}></div>
+              </div>
+            </div>
+          </div>
+          
+          {/* Control Panel Lights */}
+          <div className="flex justify-center gap-2 mb-2">
+            <div className="w-4 h-4 rounded-full bg-orange-500 animate-pulse" style={{ animationDuration: '1s' }}></div>
+            <div className="w-4 h-4 rounded-full bg-red-500 animate-pulse" style={{ animationDuration: '1.5s' }}></div>
+            <div className="w-4 h-4 rounded-full bg-white animate-pulse" style={{ animationDuration: '2s' }}></div>
+            <div className="w-4 h-4 rounded-full bg-pink-300 animate-pulse" style={{ animationDuration: '1.2s' }}></div>
+            <div className="w-4 h-4 rounded-full bg-white animate-pulse" style={{ animationDuration: '1.8s' }}></div>
+            <div className="w-4 h-4 rounded-full bg-orange-500 animate-pulse" style={{ animationDuration: '1.4s' }}></div>
+            <div className="w-4 h-4 rounded-full bg-red-500 animate-pulse" style={{ animationDuration: '2.2s' }}></div>
+          </div>
+          
+          <p className="text-yellow-300 text-lg font-semibold mb-2">
+            🏈 Advanced Monte Carlo Simulation System 🎰
+          </p>
+          <div className="flex justify-center gap-3 text-xs text-slate-300">
+            <span className="bg-red-600/30 px-3 py-1 rounded-full border border-red-500">● ACTIVE</span>
+            <span className="bg-yellow-600/30 px-3 py-1 rounded-full border border-yellow-500">● CALCULATING</span>
+            <span className="bg-green-600/30 px-3 py-1 rounded-full border border-green-500">● READY</span>
+          </div>
         </div>
 
         {/* CSV Upload Section */}
         {!csvUploaded && (
-          <div className="bg-slate-800 rounded-xl p-8 mb-8 border border-slate-700 shadow-2xl">
+          <div className="bg-gradient-to-b from-gray-400 to-gray-500 p-8 mb-8 border-4 border-gray-600 shadow-2xl rounded-lg">
             <div className="flex items-center gap-3 mb-6">
-              <Database className="w-8 h-8 text-blue-400" />
-              <h2 className="text-2xl font-bold">Step 1: Upload Team Database</h2>
+              <Database className="w-8 h-8 text-orange-600" />
+              <h2 className="text-2xl font-bold text-black">STEP 1: UPLOAD TEAM DATABASE</h2>
             </div>
             
-            <div className="bg-slate-900/50 rounded-lg p-6 mb-6">
-              <p className="text-slate-300 mb-4">
+            <div className="bg-slate-900/70 rounded-lg p-6 mb-6 border-2 border-yellow-600">
+              <p className="text-yellow-200 mb-4 font-semibold">
                 Upload a CSV file containing your NFL team statistics. The app will automatically detect column names with spaces.
               </p>
-              <div className="text-sm text-slate-400 mb-2">
-                <strong className="text-slate-300">Expected columns (with variations supported):</strong>
+              <div className="text-sm text-yellow-200 mb-2">
+                <strong className="text-yellow-100">EXPECTED COLUMNS (WITH VARIATIONS SUPPORTED):</strong>
               </div>
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-sm text-slate-400 mb-4">
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-sm text-yellow-200 mb-4 font-semibold">
                 <div>• team / Team</div>
                 <div>• Offensive PPD</div>
                 <div>• Defensive PPD allowed</div>
@@ -833,19 +882,19 @@ const NFLTotalsSimulator = () => {
                 <div>• Offensive Pass rate</div>
                 <div>• Offensive Sec/snap</div>
               </div>
-              <p className="text-xs text-slate-500">
-                Note: The app will attempt to match variations of these column names (e.g., "PPD", "Off PPD", "Offensive PPD")
+              <p className="text-xs text-yellow-300 font-semibold">
+                NOTE: The app will attempt to match variations of these column names (e.g., "PPD", "Off PPD", "Offensive PPD")
               </p>
             </div>
 
-            <label className="flex flex-col items-center justify-center w-full h-64 border-2 border-dashed border-slate-600 rounded-lg cursor-pointer bg-slate-900/30 hover:bg-slate-900/50 transition-all">
+            <label className="flex flex-col items-center justify-center w-full h-64 border-4 border-dashed border-orange-600 rounded-lg cursor-pointer bg-slate-800 hover:bg-slate-700 transition-all shadow-xl">
               <div className="flex flex-col items-center justify-center pt-5 pb-6">
-                <Upload className="w-16 h-16 mb-4 text-slate-400" />
-                <p className="mb-2 text-lg font-semibold text-slate-300">
-                  Click to upload CSV file
+                <Upload className="w-16 h-16 mb-4 text-orange-400" />
+                <p className="mb-2 text-lg font-semibold text-yellow-300">
+                  CLICK TO UPLOAD CSV FILE
                 </p>
-                <p className="text-sm text-slate-400">
-                  CSV files only
+                <p className="text-sm text-yellow-200">
+                  CSV FILES ONLY
                 </p>
               </div>
               <input
@@ -1146,10 +1195,10 @@ const NFLTotalsSimulator = () => {
               <button
                 onClick={runSimulation}
                 disabled={!selectedHomeTeam || !selectedAwayTeam || isSimulating}
-                className="mt-6 w-full bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 disabled:from-slate-600 disabled:to-slate-700 text-white font-bold py-4 px-6 rounded-lg flex items-center justify-center gap-3 transition-all shadow-lg"
+                className="mt-6 w-full bg-gradient-to-r from-orange-600 to-red-600 hover:from-orange-700 hover:to-red-700 disabled:from-slate-600 disabled:to-slate-700 text-white font-bold py-4 px-6 rounded-lg flex items-center justify-center gap-3 transition-all shadow-lg text-lg border-2 border-yellow-400"
               >
                 <Play className="w-6 h-6" />
-                {isSimulating ? "Simulating..." : `Run ${gameSettings.numSimulations.toLocaleString()} Simulations`}
+                {isSimulating ? "SIMULATING..." : `RUN ${gameSettings.numSimulations.toLocaleString()} SIMULATIONS`}
               </button>
             </div>
 
