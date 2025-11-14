@@ -1,613 +1,1314 @@
 'use client'
 
-import React, { useState } from 'react'
-import { Upload, BarChart3, Wind, CloudRain, Sun, Thermometer, Play } from 'lucide-react'
+import React, { useState } from "react";
+import { Upload, Play, BarChart3, TrendingUp, Database, AlertCircle } from "lucide-react";
 
 /**
- * NFL Totals Simulator – HYBRID
- * Engine: Gambletron core (PPD z-score matchup, pace-derived drives, zero-sum TOs)
- * Weather: Applied ONLY AFTER expected team points are computed (post‑hoc total adjustment)
- *
- * Key differences from other builds:
- * - Keeps Gambletron scoring pipeline/params intact
- * - Adds a weather module that nudges the FINAL MEANS (team points) by splitting a total delta 50/50
- * - Keeps correlation RHO fixed (0.20) to match original engine behavior
+ * NFL Monte Carlo Simulator - ANCHORED SHRINK CALIBRATION
+ * 
+ * Core Features:
+ * 1. CSV Upload for W11 2024 team database
+ * 2. Team selection interface with stat preview
+ * 3. Monte Carlo simulation (10k+ iterations)
+ * 4. Correlated random variables (adaptive ρ)
+ * 
+ * Scoring Model:
+ * - Anchored shrink formula: PPD_adj = league_avg + λ(PPD_raw - league_avg)
+ * - Lambda (λ) = 0.88 (preserves base scoring, softens extremes)
+ * - PPD clamping (0.8 to 3.2) for stability
+ * - League averages: PPD = 2.128, PPD_def = 2.123
+ * 
+ * Weather System (Empirically Calibrated):
+ * - Dome Game: +1.5 points total
+ * - Wind: -0.07 per MPH (15 MPH = -1.1 pts)
+ * - Heavy Rain: -1.8 points (stacks with wind)
+ * - 20 MPH + Heavy Rain: -3.2 points total
+ * - Perfect conditions (<5 MPH): ~0 points
+ * 
+ * Betting Analysis:
+ * - Game totals over/under
+ * - Point spread with alt-lines table
+ * - Fair odds (American format)
+ * - Expected value at -110 juice
+ * - Kelly criterion bet sizing
+ * - Moneyline win probabilities
  */
 
-export default function NFLTotalsHybrid() {
-  // ===== League / Params (from Gambletron core) =====
-  const params = {
-    lg: {
-      // Offensive averages
-      PPD: 2.128221,
-      PPD_sd: 0.450432,
-      EPA: 0.021441,
-      EPA_sd: 0.079638,
-      SR: 0.470531,
-      SR_sd: 0.032318,
-      Xpl: 0.068034,
-      Xpl_sd: 0.011744,
-      RZ: 0.480041,
-      RZ_sd: 0.087699,
-      ThreeOut: 0.073256,
-      ThreeOut_sd: 0.027942,
-      Pen: 0.631683,
-      Pen_sd: 0.094566,
-      Drives: 10.736892,
-
-      // Defensive averages
-      PPD_def: 2.123475,
-      PPD_def_sd: 0.357726,
-      EPA_def: 0.020530,
-      SR_def: 0.470253,
-      Xpl_def: 0.067706,
-      RZ_def: 0.481841,
-      ThreeOut_def: 0.072447,
-      Pen_def: 0.634701,
-      Drives_def: 10.728733,
-
-      // Pace factors
-      SecSnap: 21.639937,
-      SecSnap_sd: 1.015126,
-      PassRate: 0.544806,
-      PassRate_sd: 0.047359,
-      NoHuddle: 0.084066,
-      NoHuddle_sd: 0.093386,
-      PlaysPerDrive: 7.559738,
-
-      // Other
-      TO_pct_league: 0.106391,
-      TO_pct_sd: 0.034313,
-      TO_points: 2.4,
-      StartingFP: 30.311875,
-      StartingFP_sd: 1.521178,
-    },
-    weights: {
-      PPD: 0.20,
-      EPA: 0.35,
-      SR: 0.25,
-      Xpl: 0.05,
-      RZ: 0.05,
-      ThreeOut_eff: 0.35,
-      Pen: 0.25,
-      Pen_def: 0.15,
-      DVOA_off: 0.35,
-      DVOA_def: 0.35,
-      FP: 0.15,
-    },
-    DVOA_MULT: 1.2,
-    DVOA_CAP: 0.10,
-    NET_ADV_SHRINK: 0.60,
-    TO_DELTA_SHRINK: 0.75,
-    EV_SD_Total: 12.7,
-  }
-
-  // Correlation fixed to preserve core engine
-  const RHO = 0.20
-
-  // ===== Weather (post‑hoc) =====
-  const weatherParams = {
-    dome_bonus_total: 2.5, // add to TOTAL only; split 50/50 to teams
-    wind_threshold_mph: 12,
-    wind_per_mph_above_threshold_total: -0.07, // total impact per mph above threshold
-    extreme_cold_threshold_f: 20,
-    extreme_cold_total_penalty: -1.0,
-    precip_total_adjustments: {
-      none: 0,
-      light_rain: -0.8,
-      heavy_rain: -1.6,
-      snow: -2.0,
-    },
-  }
-
-  // ===== UI State =====
-  const [teamDB, setTeamDB] = useState({})
-  const [teamList, setTeamList] = useState([])
-  const [homeTeam, setHomeTeam] = useState('')
-  const [awayTeam, setAwayTeam] = useState('')
-  const [numSimulations, setNumSimulations] = useState(10000)
-  const [marketTotal, setMarketTotal] = useState('')
-  const [homeTeamTotal, setHomeTeamTotal] = useState('')
-  const [awayTeamTotal, setAwayTeamTotal] = useState('')
-  const [uploadStatus, setUploadStatus] = useState('')
-  const [simulationResults, setSimulationResults] = useState(null)
-  const [isSimulating, setIsSimulating] = useState(false)
-
-  const [weather, setWeather] = useState({
+const NFLTotalsSimulator = () => {
+  // State management
+  const [teams, setTeams] = useState([]);
+  const [selectedHomeTeam, setSelectedHomeTeam] = useState(null);
+  const [selectedAwayTeam, setSelectedAwayTeam] = useState(null);
+  const [csvUploaded, setCsvUploaded] = useState(false);
+  const [uploadError, setUploadError] = useState(null);
+  const [gameSettings, setGameSettings] = useState({
+    overUnderLine: 44.5,
+    homeTeamTotal: 23.5,
+    awayTeamTotal: 21.0,
+    spread: -3.0,
+    spreadLine: -3.0, // Line to bet against
+    numSimulations: 10000,
     isDome: false,
     windMPH: 0,
-    temperatureF: 68,
-    precipitation: 'none', // none | light_rain | heavy_rain | snow
-  })
+    temperature: 70,
+    precipitation: "none"
+  });
+  const [simulationResults, setSimulationResults] = useState(null);
+  const [isSimulating, setIsSimulating] = useState(false);
 
-  // ===== CSV handling (robust percent/number coercion + aliases) =====
-  const parsePercentStrict = (v) => {
-    if (v == null) return null
-    if (typeof v === 'number') { if (v > 1 && v <= 100) return v / 100; return Number.isFinite(v) ? v : null }
-    const s = String(v).trim()
-    const neg = /^\(.*\)$/.test(s)
-    const hasPct = s.includes('%')
-    const num = parseFloat(s.replace(/[()%\s]/g, ''))
-    if (!Number.isFinite(num)) return null
-    const val = hasPct ? num / 100 : (num > 1 && num <= 100 ? num / 100 : num)
-    return neg ? -val : val
-  }
-  const parseNumberStrict = (v) => {
-    if (v == null) return null
-    if (typeof v === 'number') return Number.isFinite(v) ? v : null
-    const s = String(v).trim().replace(/,/g, '')
-    const n = +s
-    return Number.isFinite(n) ? n : null
+  // League baseline parameters (W11 2024 database averages)
+  const params = {
+    lg: {
+      // Offensive averages (from W11 database)
+      PPD: 2.24,           // Increased to match 2024 NFL scoring environment
+      PPD_sd: 0.42,
+      EPA: 0.022651,
+      EPA_sd: 0.127,
+      SR: 0.4470,
+      SR_sd: 0.05,
+      Xpl: 0.0975,
+      Xpl_sd: 0.033,
+      RZ: 0.5922,
+      RZ_sd: 0.12,
+      ThreeOut: 0.2174,
+      ThreeOut_sd: 0.05,
+      Pen: 0.330629,
+      Pen_sd: 0.12,
+      Drives: 10.18021,
+      
+      // Defensive averages (from W11 database)
+      PPD_def: 2.24,       // Updated to match offensive average
+      PPD_def_sd: 0.42,
+      EPA_def: 0.022565,
+      SR_def: 0.4449,
+      Xpl_def: 0.0973,
+      RZ_def: 0.5838,
+      ThreeOut_def: 0.2149,
+      Pen_def: 0.254817,
+      Drives_def: 10.18331,
+      
+      // Pace factors
+      SecSnap: 27.22985,
+      SecSnap_sd: 2.0,
+      PassRate: 0.5404,
+      PassRate_sd: 0.08,
+      NoHuddle: 0.1053,
+      NoHuddle_sd: 0.10,
+      PlaysPerDrive: 6.188675,
+      
+      // Other
+      TO_pct_league: 0.12,
+      TO_pct_sd: 0.04,
+      TO_points: 2.4,
+      StartingFP: 30.10622,
+      StartingFP_sd: 3.0,
+    },
+    LAMBDA_BASE: 0.95, // Increased from 0.88 - less shrink preserves more edge
+    LAMBDA_HIGH_TOTAL: 0.96, // For high-scoring games (46+)
+    LAMBDA_LOW_TOTAL: 0.92, // For low-scoring games (41-)
+    HOME_FIELD_ADVANTAGE: 0.20, // +0.20 PPD for home team (~2.0 points)
+    NOISE_REDUCTION: 2.6, // Base noise level
+    
+    // ===== WEATHER COEFFICIENTS =====
+    weather: {
+      dome_bonus: 2.5,      // Increased dome advantage
+      wind_per_mph_above_threshold: -0.035,  // Gentler slope
+      wind_threshold: 12,    // No penalty under 12 MPH (market treats as noise)
+      wind_variance_per_mph: 0.01,
+      extreme_cold_threshold: 20,
+      extreme_cold_penalty: -1.0,
+      precip_adjustments: {
+        none: 0,
+        light_rain: -0.8,    // Light rain drag
+        heavy_rain: -1.0,    // Heavy rain drag (reduced)
+        snow: -1.5,          // Snow drag (reduced)
+      },
+    },
+  };
+
+  const RHO_BASELINE = 0.20;
+  const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+
+  /**
+   * Convert probability to American odds for display
+   */
+  const toAmericanOdds = (prob) => {
+    if (prob <= 0) return Infinity;
+    if (prob >= 1) return -Infinity;
+    return prob >= 0.5 
+      ? -Math.round((prob / (1 - prob)) * 100)
+      : Math.round(((1 - prob) / prob) * 100);
+  };
+
+  /**
+   * Calculate adaptive correlation (ρ) based on game context
+   */
+  function calculateAdaptiveCorrelation(homeTeam, awayTeam, spread, isDome, windMPH, precip) {
+    let rho = RHO_BASELINE;
+    
+    // Helper to find column value
+    const findValue = (team, possibleNames) => {
+      for (let name of possibleNames) {
+        if (team[name] !== undefined && team[name] !== '') {
+          return team[name];
+        }
+      }
+      return null;
+    };
+    
+    // 1. Competitiveness factor
+    const absSpread = Math.abs(spread);
+    if (absSpread <= 3) rho += 0.10;
+    else if (absSpread <= 7) rho += 0.05;
+    else if (absSpread >= 14) rho -= 0.10;
+    
+    // 2. Style alignment
+    const homePassRate = parseFloat(findValue(homeTeam, ['Offensive Early Down Pass Rate', 'Offensive Pass rate', 'PassRate', 'Pass rate'])) || params.lg.PassRate;
+    const awayPassRate = parseFloat(findValue(awayTeam, ['Offensive Early Down Pass Rate', 'Offensive Pass rate', 'PassRate', 'Pass rate'])) || params.lg.PassRate;
+    const passRateDiff = Math.abs(homePassRate - awayPassRate);
+    if (passRateDiff < 0.05) rho += 0.08;
+    else if (passRateDiff > 0.15) rho -= 0.05;
+    
+    const homeXpl = parseFloat(findValue(homeTeam, ['Offensive Explosive Play Rate', 'Offensive Explosive rate', 'Xpl_rate', 'Explosive rate'])) || params.lg.Xpl;
+    const awayXpl = parseFloat(findValue(awayTeam, ['Offensive Explosive Play Rate', 'Offensive Explosive rate', 'Xpl_rate', 'Explosive rate'])) || params.lg.Xpl;
+    const xplSum = homeXpl + awayXpl;
+    if (xplSum > 0.20) rho += 0.05;
+    
+    // 3. Environmental factors
+    if (isDome) rho += 0.05;
+    if (windMPH > 15) rho -= 0.15;
+    else if (windMPH > 10) rho -= 0.08;
+    
+    if (precip === "heavy_rain" || precip === "snow") rho -= 0.10;
+    else if (precip === "light_rain") rho -= 0.05;
+    
+    // 4. Pace coupling
+    const homeSecSnap = parseFloat(findValue(homeTeam, ['Offensive Seconds/Snap', 'Offensive Sec/snap', 'SecSnap', 'Sec/snap'])) || params.lg.SecSnap;
+    const awaySecSnap = parseFloat(findValue(awayTeam, ['Offensive Seconds/Snap', 'Offensive Sec/snap', 'SecSnap', 'Sec/snap'])) || params.lg.SecSnap;
+    const avgPace = (homeSecSnap + awaySecSnap) / 2;
+    if (avgPace < 26) rho += 0.05;
+    else if (avgPace > 29) rho -= 0.03;
+    
+    return clamp(rho, -0.05, 0.60);
   }
 
-  const SCHEMA = {
-    percent: new Set([
-      'Off Success Rate','Off Explosive Rate','Off Red-Zone TD%','Off 3-Out %',
-      'Def Success Rate','Def Explosive Rate','Def Red Zone TD %','DEF 3-out %','Def 3-Out %',
-      'No-Huddle %','Neutral Early-Down Pass %','Off DVOA','DEF DVOA','Def DVOA','Off Turnover %','Def Turnover %',
-      // verbose
-      'Offensive Success Rate','Offensive Explosive Play Rate','Offensive Red Zone TD Rate','Off 3-out Rate',
-      'Defensive Success Rate','Defensive Explosive Play Rate','Defensive Red Zone TD Rate','Defensive 3-out Rate',
-      'Offensive No Huddle Rate','Offensive Early Down Pass Rate','Offensive DVOA','Defensive DVOA','Offensive TO%','Defensive TO%',
-    ]),
-    float: new Set([
-      'OFF PPD','Off PPD','OFF EPA','Off EPA/play','DEF PPD Allowed','Def PPD Allowed','Def EPA/play allowed',
-      'Off Penalties per Drive','DEF Penalties per Drive','Off Drives/G','Def Drives/G','Off Sec/Snap','Off Avg Starting FP',
-      'Off Plays/Drive','Def Plays/Drive Allowed',
-      // aliases
-      'Offensive Pts/Drive','Offensive EPA/Play','Defensive Pts/Drive','Defensive EPA/Play','Offensive Penalties/Drive','Defensive Penalties/Drive',
-      'Offensive Drives/Game','Defensive Drives/Game','Offensive Seconds/Snap','Offensive Average Starting Field Position','Offensive Plays/Drive','Defensive Plays/Drive',
-    ]),
-    string: new Set(['Team','team'])
+  /**
+   * Robust percent parsing - handles "44.7", "0.447", or "44.7%"
+   */
+  function parsePercent(val) {
+    if (val == null || val === "") return null;
+    const num = parseFloat(val);
+    if (isNaN(num)) return null;
+    if (num > 1) return num / 100;
+    return num;
   }
 
-  const COLUMN_ALIASES = {
-    'Offensive Drives/Game': 'Off Drives/G',
-    'Offensive Pts/Drive': 'Off PPD',
-    'Offensive EPA/Play': 'Off EPA/play',
-    'Offensive Success Rate': 'Off Success Rate',
-    'Offensive Explosive Play Rate': 'Off Explosive Rate',
-    'Offensive Plays/Drive': 'Off Plays/Drive',
-    'Offensive Red Zone TD Rate': 'Off Red-Zone TD%',
-    'Offensive TO%': 'Off Turnover %',
-    'Offensive Penalties/Drive': 'Off Penalties per Drive',
-    'Offensive Seconds/Snap': 'Off Sec/Snap',
-    'Offensive Average Starting Field Position': 'Off Avg Starting FP',
-    'Offensive No Huddle Rate': 'No-Huddle %',
-    'Offensive Early Down Pass Rate': 'Neutral Early-Down Pass %',
-    'Off 3-out Rate': 'Off 3-Out %',
-    'Defensive Drives/Game': 'Def Drives/G',
-    'Defensive Pts/Drive': 'Def PPD Allowed',
-    'Defensive EPA/Play': 'Def EPA/play allowed',
-    'Defensive Success Rate': 'Def Success Rate',
-    'Defensive Explosive Play Rate': 'Def Explosive Rate',
-    'Defensive Plays/Drive': 'Def Plays/Drive Allowed',
-    'Defensive Red Zone TD Rate': 'Def Red Zone TD %',
-    'Defensive 3-out Rate': 'Def 3-Out %',
-    'Defensive TO%': 'Def Turnover %',
-    'Defensive Penalties/Drive': 'DEF Penalties per Drive',
-    'Defensive DVOA': 'Def DVOA',
-  }
-
-  const coerceRow = (row) => {
-    const out = {}
-    for (const [k, v] of Object.entries(row)) {
-      const columnName = COLUMN_ALIASES[k] || k
-      if (SCHEMA.percent.has(k) || SCHEMA.percent.has(columnName)) out[columnName] = parsePercentStrict(v)
-      else if (SCHEMA.float.has(k) || SCHEMA.float.has(columnName)) out[columnName] = parseNumberStrict(v)
-      else if (SCHEMA.string.has(k) || SCHEMA.string.has(columnName)) out[columnName] = v
-      else out[columnName] = v
+  /**
+   * Parse CSV file and extract team data
+   * Handles column names with spaces and maps them to our internal structure
+   */
+  function parseCSV(csvText) {
+    const lines = csvText.trim().split('\n');
+    if (lines.length < 2) {
+      throw new Error("CSV file appears to be empty or invalid");
     }
-    return out
-  }
 
-  const handleFileUpload = async (event) => {
-    const file = event.target.files?.[0]
-    if (!file) return
+    // Parse headers - handle both comma and potentially quoted fields
+    const headerLine = lines[0];
+    const headers = parseCSVLine(headerLine);
+    const teamData = [];
 
-    setUploadStatus('Reading file…')
-    try {
-      const text = await file.text()
-      const Papa = await import('papaparse')
-      const parsed = Papa.parse(text, { header: true, dynamicTyping: false, skipEmptyLines: true })
-      if (!parsed.data || parsed.data.length === 0) { setUploadStatus('❌ Error: empty CSV'); return }
+    console.log("CSV Headers found:", headers);
 
-      const nextDB = {}
-      const names = []
-      parsed.data.forEach((row) => {
-        const coerced = coerceRow(row)
-        const name = String(coerced['Team'] || coerced['team'] || '').trim()
-        if (!name) return
-        names.push(name)
-        nextDB[name] = coerced
-      })
-      if (names.length === 0) { setUploadStatus("❌ Error: No teams found. Make sure CSV has 'Team' column."); return }
+    for (let i = 1; i < lines.length; i++) {
+      const values = parseCSVLine(lines[i]);
+      if (values.length < headers.length - 5) continue; // Allow some flexibility
 
-      setTeamDB(nextDB)
-      setTeamList(names.sort())
-      setUploadStatus(`✅ Loaded ${names.length} teams`)
-      setSimulationResults(null)
-    } catch (e) {
-      setUploadStatus(`❌ Error: ${e?.message || e}`)
+      const team = {};
+      headers.forEach((header, index) => {
+        if (index < values.length) {
+          team[header] = values[index];
+        }
+      });
+
+      // Validate required fields - just need team name
+      if (team.team || team.Team) {
+        // Normalize team name to uppercase "Team" for consistency
+        team.Team = team.team || team.Team;
+        teamData.push(team);
+      }
     }
-  }
 
-  // ===== Helpers =====
-  const zScore = (val, mean, sd) => { const s = (!sd || sd === 0) ? 1e-9 : sd; const v = (val == null || mean == null) ? mean : val; return (v - mean) / s }
-
-  const projectTeamFromDB = (teamName) => {
-    const r = teamDB[teamName] || {}
-    const lg = params.lg
-    return {
-      name: teamName,
-      // Offense
-      off_ppd: r['Off PPD'] ?? lg.PPD,
-      off_epa: r['Off EPA/play'] ?? lg.EPA,
-      off_sr: r['Off Success Rate'] ?? lg.SR,
-      off_xpl: r['Off Explosive Rate'] ?? lg.Xpl,
-      off_rz: r['Off Red-Zone TD%'] ?? lg.RZ,
-      off_3out: r['Off 3-Out %'] ?? lg.ThreeOut,
-      off_penalties: r['Off Penalties per Drive'] ?? lg.Pen,
-      off_dvoa: r['Off DVOA'] ?? 0,
-      off_drives: r['Off Drives/G'] ?? lg.Drives,
-      // Defense
-      def_ppd_allowed: r['Def PPD Allowed'] ?? params.lg.PPD_def,
-      def_epa_allowed: r['Def EPA/play allowed'] ?? params.lg.EPA_def,
-      def_sr: r['Def Success Rate'] ?? params.lg.SR_def,
-      def_xpl: r['Def Explosive Rate'] ?? params.lg.Xpl_def,
-      def_penalties: r['DEF Penalties per Drive'] ?? params.lg.Pen_def,
-      def_rz: r['Def Red Zone TD %'] ?? params.lg.RZ_def,
-      def_3out: r['Def 3-Out %'] ?? r['DEF 3-out %'] ?? params.lg.ThreeOut_def,
-      def_dvoa: r['Def DVOA'] ?? 0,
-      def_drives: r['Def Drives/G'] ?? params.lg.Drives_def,
-      def_to_pct: r['Def Turnover %'] ?? params.lg.TO_pct_league,
-      // Misc
-      off_to_pct: r['Off Turnover %'] ?? params.lg.TO_pct_league,
-      off_fp: r['Off Avg Starting FP'] ?? params.lg.StartingFP,
-      no_huddle: r['No-Huddle %'] ?? params.lg.NoHuddle,
-      ed_pass: r['Neutral Early-Down Pass %'] ?? params.lg.PassRate,
-      off_plays: r['Off Plays/Drive'] ?? params.lg.PlaysPerDrive,
-      def_plays: r['Def Plays/Drive Allowed'] ?? params.lg.PlaysPerDrive,
-      sec_snap: r['Off Sec/Snap'] ?? params.lg.SecSnap,
+    if (teamData.length === 0) {
+      throw new Error("No valid team data found. Please check CSV format.");
     }
+
+    return teamData;
   }
 
-  const calcPaceAdjustment = (secPerSnap, passRate, noHuddleRate, lg) => {
-    const secSnapZ = (lg.SecSnap - secPerSnap) / lg.SecSnap_sd
-    const passZ = (passRate - lg.PassRate) / lg.PassRate_sd
-    const noHuddleZ = (noHuddleRate - lg.NoHuddle) / lg.NoHuddle_sd
-    const paceZ = 0.6 * secSnapZ + 0.25 * passZ + 0.15 * noHuddleZ
-    return 1 + 0.05 * paceZ
-  }
+  /**
+   * Parse a CSV line handling quoted fields
+   */
+  function parseCSVLine(line) {
+    const result = [];
+    let current = '';
+    let inQuotes = false;
 
-  // Core Gambletron estimate (no weather here!)
-  const estimateScore = (team, oppDefense) => {
-    const lg = params.lg
-    const w = params.weights
-
-    const off_ppd = team.off_ppd ?? lg.PPD
-    const def_ppda = oppDefense.def_ppd_allowed ?? lg.PPD_def
-
-    const z_off = (off_ppd - lg.PPD) / lg.PPD_sd
-    const z_def = (def_ppda - lg.PPD_def) / lg.PPD_def_sd
-
-    const effZ = 0.60 * z_off + 0.40 * (-z_def)
-
-    const offD = Math.max(-params.DVOA_CAP, Math.min(params.DVOA_CAP, team.off_dvoa || 0))
-    const defD = Math.max(-params.DVOA_CAP, Math.min(params.DVOA_CAP, oppDefense.def_dvoa || 0))
-    const dvoa_raw = (offD * w.DVOA_off) + (defD * w.DVOA_def)
-    const dvoa_adj = params.DVOA_MULT * dvoa_raw
-
-    const fp_z = zScore(team.off_fp, lg.StartingFP, lg.StartingFP_sd)
-    const fp_adj = fp_z * w.FP
-
-    const net_adv = Math.max(-2.0, Math.min(2.0, params.NET_ADV_SHRINK * (effZ + dvoa_adj + fp_adj)))
-    let ppd = lg.PPD + net_adv * lg.PPD_sd
-    ppd = Math.max(0.8, Math.min(3.2, ppd))
-
-    // Pace → drives (kept from Gambletron)
-    const homePaceAdj = calcPaceAdjustment(team.sec_snap ?? lg.SecSnap, team.ed_pass ?? lg.PassRate, team.no_huddle ?? lg.NoHuddle, lg)
-    const awayPaceAdj = calcPaceAdjustment(oppDefense.sec_snap ?? lg.SecSnap, oppDefense.ed_pass ?? lg.PassRate, oppDefense.no_huddle ?? lg.NoHuddle, lg)
-    const gamePace = (homePaceAdj + awayPaceAdj) / 2
-
-    const drivesRaw = lg.Drives * gamePace
-    const drivesShrunk = 0.6 * drivesRaw + 0.4 * lg.Drives
-    const drives = Math.max(9.0, Math.min(11.5, drivesShrunk))
-
-    return { ppd, drives, team, oppDefense }
-  }
-
-  // Zero‑sum TOs (kept from Gambletron)
-  const calculateZeroSumTurnovers = (homeCalc, awayCalc) => {
-    const lg = params.lg
-    const clampRate = (x) => Math.max(0, Math.min(0.30, x))
-
-    const giveHome = clampRate((homeCalc.team.off_to_pct + awayCalc.team.def_to_pct) / 2)
-    const takeHome = clampRate((awayCalc.team.off_to_pct + homeCalc.team.def_to_pct) / 2)
-    const deltaHome = (takeHome - giveHome) * params.TO_DELTA_SHRINK
-
-    const giveAway = clampRate((awayCalc.team.off_to_pct + homeCalc.team.def_to_pct) / 2)
-    const takeAway = clampRate((homeCalc.team.off_to_pct + awayCalc.team.def_to_pct) / 2)
-    const deltaAway = (takeAway - giveAway) * params.TO_DELTA_SHRINK
-
-    const avgDelta = (deltaHome - deltaAway) / 2
-    const deltaHome0 = avgDelta
-
-    const avgDrives = (homeCalc.drives + awayCalc.drives) / 2
-
-    const to_points_home = Math.max(-3.0, Math.min(3.0, deltaHome0 * lg.TO_points * avgDrives))
-    const to_points_away = -to_points_home
-
-    return { to_points_home, to_points_away }
-  }
-
-  // Weather impact function (TOTAL only). Returns a TOTAL delta to be split evenly.
-  const computeWeatherTotalDelta = () => {
-    const w = weather
-    const wp = weatherParams
-    if (w.isDome) return wp.dome_bonus_total
-
-    let total = 0
-    if (w.windMPH > wp.wind_threshold_mph) {
-      const over = w.windMPH - wp.wind_threshold_mph
-      total += over * wp.wind_per_mph_above_threshold_total
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      
+      if (char === '"') {
+        inQuotes = !inQuotes;
+      } else if (char === ',' && !inQuotes) {
+        result.push(current.trim());
+        current = '';
+      } else {
+        current += char;
+      }
     }
-    if (w.temperatureF < wp.extreme_cold_threshold_f) total += wp.extreme_cold_total_penalty
-    total += (wp.precip_total_adjustments[w.precipitation] || 0)
-    return total
+    
+    result.push(current.trim());
+    return result;
   }
 
-  // ===== Simulation =====
-  const runMonteCarloSimulation = () => {
-    if (!homeTeam || !awayTeam) { alert('Please select both home and away teams'); return }
-    setIsSimulating(true)
-    setSimulationResults(null)
+  /**
+   * Get display value for a team stat - tries multiple column name variations
+   */
+  const getDisplayValue = (team, possibleNames) => {
+    for (let name of possibleNames) {
+      const value = team[name];
+      if (value !== undefined && value !== null && value !== '') {
+        return value;
+      }
+    }
+    return 'N/A';
+  };
 
+  /**
+   * Handle CSV file upload
+   */
+  const handleFileUpload = (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    setUploadError(null);
+    const reader = new FileReader();
+
+    reader.onload = (e) => {
+      try {
+        const csvText = e.target.result;
+        const parsedTeams = parseCSV(csvText);
+        
+        if (parsedTeams.length === 0) {
+          throw new Error("No valid team data found in CSV");
+        }
+
+        setTeams(parsedTeams);
+        setCsvUploaded(true);
+        
+        // Debug: Show first team's columns
+        console.log(`Successfully loaded ${parsedTeams.length} teams`);
+        console.log("Sample team data (first team):", parsedTeams[0]);
+        console.log("Available columns:", Object.keys(parsedTeams[0]));
+      } catch (error) {
+        setUploadError(error.message);
+        console.error("CSV parsing error:", error);
+      }
+    };
+
+    reader.onerror = () => {
+      setUploadError("Failed to read file");
+    };
+
+    reader.readAsText(file);
+  };
+
+  /**
+   * Run Monte Carlo simulation
+   */
+  const runSimulation = () => {
+    if (!selectedHomeTeam || !selectedAwayTeam) {
+      alert("Please select both home and away teams");
+      return;
+    }
+
+    setIsSimulating(true);
+    
+    // Use setTimeout to allow UI to update
     setTimeout(() => {
-      const homeData = projectTeamFromDB(homeTeam)
-      const awayData = projectTeamFromDB(awayTeam)
+      try {
+        const results = simulateGame(
+          selectedHomeTeam,
+          selectedAwayTeam,
+          gameSettings
+        );
+        setSimulationResults(results);
+      } catch (error) {
+        alert(`Simulation error: ${error.message}`);
+        console.error(error);
+      } finally {
+        setIsSimulating(false);
+      }
+    }, 100);
+  };
 
-      const homeCalc = estimateScore(homeData, awayData)
-      const awayCalc = estimateScore(awayData, homeData)
+  /**
+   * Main simulation function
+   */
+  function simulateGame(homeTeam, awayTeam, settings) {
+    const numSims = settings.numSimulations;
+    const results = {
+      homeScores: [],
+      awayScores: [],
+      totals: [],
+      margins: [], // Home team margin (positive = home wins)
+      correlationUsed: 0,
+      weatherAdjustment: 0
+    };
 
-      const { to_points_home, to_points_away } = calculateZeroSumTurnovers(homeCalc, awayCalc)
+    // Calculate correlation
+    const rho = calculateAdaptiveCorrelation(
+      homeTeam,
+      awayTeam,
+      settings.spread,
+      settings.isDome,
+      settings.windMPH,
+      settings.precipitation
+    );
+    results.correlationUsed = rho;
 
-      // Base expected means (NO WEATHER yet)
-      let homeMean = homeCalc.ppd * homeCalc.drives + to_points_home
-      let awayMean = awayCalc.ppd * awayCalc.drives + to_points_away
+    // Calculate weather adjustment
+    let weatherAdj = 0;
+    if (settings.isDome) {
+      weatherAdj += params.weather.dome_bonus;
+    } else {
+      // Outdoor conditions - apply wind effect
+      if (settings.windMPH > params.weather.wind_threshold) {
+        const windImpact = settings.windMPH * params.weather.wind_per_mph_above_threshold;
+        weatherAdj += windImpact;
+      }
+      
+      // Temperature effect
+      if (settings.temperature < params.weather.extreme_cold_threshold) {
+        weatherAdj += params.weather.extreme_cold_penalty;
+      }
+      
+      // Precipitation effect (stacks with wind)
+      weatherAdj += params.weather.precip_adjustments[settings.precipitation] || 0;
+    }
+    results.weatherAdjustment = weatherAdj;
 
-      // === POST‑HOC WEATHER: adjust FINAL means symmetrically ===
-      const totalDelta = computeWeatherTotalDelta() // can be +/-
-      homeMean = Math.max(0, homeMean + totalDelta * 0.5)
-      awayMean = Math.max(0, awayMean + totalDelta * 0.5)
+    // Get team stats
+    const homeOffense = getTeamOffensiveStats(homeTeam);
+    const homeDefense = getTeamDefensiveStats(homeTeam);
+    const awayOffense = getTeamOffensiveStats(awayTeam);
+    const awayDefense = getTeamDefensiveStats(awayTeam);
 
-      // Team-level SD from total SD and drives scaling (kept from Gambletron)
-      const targetTotalsSD = params.EV_SD_Total
-      const homeSD = (targetTotalsSD / Math.sqrt(2 * (1 + RHO))) * Math.sqrt(homeCalc.drives / params.lg.Drives)
-      const awaySD = (targetTotalsSD / Math.sqrt(2 * (1 + RHO))) * Math.sqrt(awayCalc.drives / params.lg.Drives)
+    // Debug logging
+    console.log("=== Team Stats Debug ===");
+    console.log("Home Team:", homeTeam.Team);
+    console.log("Home Offense PPD:", homeOffense.ppd, "(League avg:", params.lg.PPD, ")");
+    console.log("Home Defense PPD allowed:", homeDefense.ppd_allowed, "(League avg:", params.lg.PPD_def, ")");
+    console.log("Away Team:", awayTeam.Team);
+    console.log("Away Offense PPD:", awayOffense.ppd, "(League avg:", params.lg.PPD, ")");
+    console.log("Away Defense PPD allowed:", awayDefense.ppd_allowed, "(League avg:", params.lg.PPD_def, ")");
+    
+    // Sanity check
+    if (homeOffense.ppd === awayOffense.ppd && homeDefense.ppd_allowed === awayDefense.ppd_allowed) {
+      console.warn("⚠️ WARNING: Both teams have identical stats! Check CSV data or column mapping.");
+    }
+    
+    // === ANCHORED SHRINK FORMULA WITH CONTEXTUAL LAMBDA ===
+    // Calculate raw matchup PPD, then apply contextual lambda based on expected total
+    // Higher totals (elite offenses) → higher lambda (preserve more edge)
+    // Lower totals (defensive games) → lower lambda (more regression)
+    
+    const PPD_FLOOR = 1.35; // Realistic minimum (~13.7 points)
+    const HOME_ADVANTAGE = params.HOME_FIELD_ADVANTAGE; // +0.15 PPD (~1.5 points)
+    
+    // Home team raw PPD (full matchup effect + home field advantage)
+    let homeRawPPD = homeOffense.ppd + (awayDefense.ppd_allowed - params.lg.PPD_def) + HOME_ADVANTAGE;
+    homeRawPPD = Math.max(PPD_FLOOR, homeRawPPD); // Apply floor
+    
+    // Away team raw PPD (full matchup effect, no home advantage)
+    let awayRawPPD = awayOffense.ppd + (homeDefense.ppd_allowed - params.lg.PPD_def);
+    awayRawPPD = Math.max(PPD_FLOOR, awayRawPPD); // Apply floor
+    
+    // Calculate raw total to determine contextual lambda
+    const rawTotal = (homeRawPPD + awayRawPPD) * params.lg.Drives;
+    
+    // Contextual lambda: preserve more signal in high-scoring games
+    let LAMBDA;
+    if (rawTotal >= 46) {
+      LAMBDA = params.LAMBDA_HIGH_TOTAL; // 0.92 - keep edges in high-scoring games
+    } else if (rawTotal <= 41) {
+      LAMBDA = params.LAMBDA_LOW_TOTAL; // 0.86 - more regression in low-scoring games
+    } else {
+      LAMBDA = params.LAMBDA_BASE; // 0.88 - baseline
+    }
+    
+    // Apply anchored shrink: shrink the DEVIATION from league mean
+    const homeExpectedPPD = params.lg.PPD + LAMBDA * (homeRawPPD - params.lg.PPD);
+    const awayExpectedPPD = params.lg.PPD + LAMBDA * (awayRawPPD - params.lg.PPD);
+    
+    console.log("\n=== PPD Calculations (contextual lambda) ===");
+    console.log("Raw total:", rawTotal.toFixed(1), "→ Lambda:", LAMBDA.toFixed(3));
+    console.log("Home raw PPD (before floor):", (homeOffense.ppd + (awayDefense.ppd_allowed - params.lg.PPD_def) + HOME_ADVANTAGE).toFixed(3), "(includes +" + HOME_ADVANTAGE.toFixed(2) + " home advantage)");
+    console.log("Home raw PPD (after floor):", homeRawPPD.toFixed(3));
+    console.log("Home deviation from league:", (homeRawPPD - params.lg.PPD).toFixed(3));
+    console.log("Home adjusted PPD:", homeExpectedPPD.toFixed(3), "= league_avg", params.lg.PPD.toFixed(3), "+", LAMBDA, "×", (homeRawPPD - params.lg.PPD).toFixed(3));
+    console.log("Home Expected score (10.18 drives):", (homeExpectedPPD * params.lg.Drives).toFixed(1));
+    console.log("");
+    console.log("Away raw PPD (before floor):", (awayOffense.ppd + (homeDefense.ppd_allowed - params.lg.PPD_def)).toFixed(3), "(no home advantage)");
+    console.log("Away raw PPD (after floor):", awayRawPPD.toFixed(3));
+    console.log("Away deviation from league:", (awayRawPPD - params.lg.PPD).toFixed(3));
+    console.log("Away adjusted PPD:", awayExpectedPPD.toFixed(3), "= league_avg", params.lg.PPD.toFixed(3), "+", LAMBDA, "×", (awayRawPPD - params.lg.PPD).toFixed(3));
+    console.log("Away Expected score (10.18 drives):", (awayExpectedPPD * params.lg.Drives).toFixed(1));
+    console.log("Total expected:", ((homeExpectedPPD + awayExpectedPPD) * params.lg.Drives).toFixed(1));
+    console.log("PPD Floor: " + PPD_FLOOR + " | Home Advantage: +" + HOME_ADVANTAGE.toFixed(2) + " PPD");
+    console.log("========================");
 
-      const n = Number(numSimulations) || 10000
-      const homeScores = new Array(n)
-      const awayScores = new Array(n)
-      const totals = new Array(n)
-      const sqrt1mr2 = Math.sqrt(1 - RHO * RHO)
+    // Run simulations
+    console.log("=== Starting Simulation Loop ===");
+    console.log("Running", numSims, "simulations");
+    console.log("Weather adjustment:", weatherAdj.toFixed(2), "points per team");
+    console.log("Correlation:", rho.toFixed(3));
+    
+    for (let i = 0; i < numSims; i++) {
+      // Generate correlated random values
+      const z1 = randn();
+      const z2 = randn();
+      const homeRandom = z1;
+      const awayRandom = rho * z1 + Math.sqrt(1 - rho * rho) * z2;
 
-      for (let i = 0; i < n; i++) {
-        const u1 = Math.random(), u2 = Math.random()
-        const r = Math.sqrt(-2 * Math.log(u1))
-        const theta = 2 * Math.PI * u2
-        const z1 = r * Math.cos(theta)
-        const z2i = r * Math.sin(theta)
-        const z2c = RHO * z1 + sqrt1mr2 * z2i
+      // Calculate team PPD - USE ANCHORED SHRINK
+      const homeNetPPD = homeExpectedPPD;
+      const awayNetPPD = awayExpectedPPD;
 
-        const h = Math.max(0, homeMean + z1 * homeSD)
-        const a = Math.max(0, awayMean + z2c * awaySD)
-
-        // Round to integer points like box score output
-        homeScores[i] = Math.round(h)
-        awayScores[i] = Math.round(a)
-        totals[i] = homeScores[i] + awayScores[i]
+      // Debug first simulation only
+      if (i === 0) {
+        console.log("\n=== First Simulation Details ===");
+        console.log("Home Net PPD:", homeNetPPD.toFixed(3));
+        console.log("Away Net PPD:", awayNetPPD.toFixed(3));
+        console.log("");
+        console.log("Random values - Home:", homeRandom.toFixed(3), "Away:", awayRandom.toFixed(3));
       }
 
-      const calcStats = (arr) => {
-        const sorted = [...arr].sort((a, b) => a - b)
-        const mean = arr.reduce((s, v) => s + v, 0) / arr.length
-        const median = sorted[Math.floor(arr.length / 2)]
-        const p10 = sorted[Math.floor(arr.length * 0.10)]
-        const p90 = sorted[Math.floor(arr.length * 0.90)]
-        return { mean, median, p10, p90 }
+      // Add randomness with reduced noise (2.6x instead of raw calculation ~3.2x)
+      // This matches observed IQR of NFL team points after shrinkage
+      const baseSD = Math.sqrt(
+        Math.pow(params.lg.PPD_sd, 2) + 
+        Math.pow(params.lg.PPD_def_sd, 2)
+      );
+      const noiseReduction = params.NOISE_REDUCTION / 3.2; // Scale from 3.2 to 2.6
+      const homeSD = baseSD * noiseReduction;
+      const awaySD = homeSD; // Same variance structure
+
+      // Drive estimation - use league average
+      const homeDrives = params.lg.Drives;
+      const awayDrives = params.lg.Drives;
+
+      // Expected scores before randomness
+      const expHome = homeNetPPD * homeDrives;
+      const expAway = awayNetPPD * awayDrives;
+
+      // Heteroskedastic noise: scale with expected score
+      // Returns sigma in POINTS (not PPD) - typical range 7-10 points
+      const sigmaTeam = (m) => Math.max(7.0, Math.min(10.0, 6.0 + 0.15 * (m - 21)));
+
+      // Calculate scores with heteroskedastic noise
+      let homeScore = Math.max(0, expHome + homeRandom * sigmaTeam(expHome));
+      let awayScore = Math.max(0, expAway + awayRandom * sigmaTeam(expAway));
+      
+      // Apply weather adjustment to TOTAL scoring (split between teams)
+      const totalWeatherImpact = weatherAdj;
+      homeScore = Math.max(0, homeScore + (totalWeatherImpact * 0.5));
+      awayScore = Math.max(0, awayScore + (totalWeatherImpact * 0.5));
+
+      if (i === 0) {
+        console.log("Heteroskedastic sigma - Home:", sigmaTeam(expHome).toFixed(2), "Away:", sigmaTeam(expAway).toFixed(2));
+        console.log("Drives - Home:", homeDrives.toFixed(1), "Away:", awayDrives.toFixed(1));
+        console.log("Expected scores - Home:", expHome.toFixed(1), "Away:", expAway.toFixed(1));
+        console.log("Weather adjustment per team:", (totalWeatherImpact * 0.5).toFixed(2));
+        console.log("Home final score:", homeScore.toFixed(1));
+        console.log("Away final score:", awayScore.toFixed(1));
+        console.log("Total:", (homeScore + awayScore).toFixed(1));
+        console.log("================================\n");
       }
 
-      const homeStats = calcStats(homeScores)
-      const awayStats = calcStats(awayScores)
-      const totalStats = calcStats(totals)
+      const homeScoreRounded = Math.round(homeScore);
+      const awayScoreRounded = Math.round(awayScore);
+      
+      results.homeScores.push(homeScoreRounded);
+      results.awayScores.push(awayScoreRounded);
+      results.totals.push(homeScoreRounded + awayScoreRounded);
+      results.margins.push(homeScoreRounded - awayScoreRounded);
+    }
+    
+    console.log("=== Simulation Complete ===");
+    console.log("Sample of first 10 home scores:", results.homeScores.slice(0, 10));
+    console.log("Sample of first 10 away scores:", results.awayScores.slice(0, 10));
+    console.log("Sample of first 10 margins:", results.margins.slice(0, 10));
 
-      let overUnder = null
-      if (marketTotal && !isNaN(parseFloat(marketTotal))) {
-        const line = parseFloat(marketTotal)
-        let over = 0, under = 0, push = 0
-        totals.forEach(t => { if (t > line) over++; else if (t < line) under++; else push++ })
-        overUnder = { line, overPct: (over / n) * 100, underPct: (under / n) * 100, pushPct: (push / n) * 100 }
-      }
-
-      let homeTeamOverUnder = null
-      if (homeTeamTotal && !isNaN(parseFloat(homeTeamTotal))) {
-        const line = parseFloat(homeTeamTotal)
-        let over = 0, under = 0, push = 0
-        homeScores.forEach(s => { if (s > line) over++; else if (s < line) under++; else push++ })
-        homeTeamOverUnder = { line, overPct: (over / n) * 100, underPct: (under / n) * 100, pushPct: (push / n) * 100 }
-      }
-
-      let awayTeamOverUnder = null
-      if (awayTeamTotal && !isNaN(parseFloat(awayTeamTotal))) {
-        const line = parseFloat(awayTeamTotal)
-        let over = 0, under = 0, push = 0
-        awayScores.forEach(s => { if (s > line) over++; else if (s < line) under++; else push++ })
-        awayTeamOverUnder = { line, overPct: (over / n) * 100, underPct: (under / n) * 100, pushPct: (push / n) * 100 }
-      }
-
-      setSimulationResults({
-        homeTeam, awayTeam,
-        weatherUsed: { ...weather, totalDelta },
-        homeProjection: homeStats,
-        awayProjection: awayStats,
-        totalProjection: totalStats,
-        overUnder, homeTeamOverUnder, awayTeamOverUnder,
-        numSimulations: n,
-      })
-      setIsSimulating(false)
-    }, 60)
+    // Calculate statistics
+    return calculateResults(results, settings, homeTeam.Team, awayTeam.Team);
   }
 
-  // ===== UI =====
+  /**
+   * Extract offensive stats from team data
+   * Handles various column naming conventions
+   */
+  function getTeamOffensiveStats(team) {
+    // Helper to find column value by multiple possible names
+    const findValue = (possibleNames) => {
+      for (let name of possibleNames) {
+        if (team[name] !== undefined && team[name] !== '') {
+          return team[name];
+        }
+      }
+      return null;
+    };
+
+    const ppd = parseFloat(findValue(['Offensive Pts/Drive', 'Offensive PPD', 'PPD', 'Off PPD', 'ppd'])) || params.lg.PPD;
+    const epa = parseFloat(findValue(['Offensive EPA/Play', 'Offensive EPA/play', 'EPA_play', 'EPA/play', 'Off EPA'])) || params.lg.EPA;
+    const sr = parsePercent(findValue(['Offensive Success Rate', 'Offensive Success rate', 'Success_rate', 'Success rate', 'SR'])) || params.lg.SR;
+    const xpl = parsePercent(findValue(['Offensive Explosive Play Rate', 'Offensive Explosive rate', 'Xpl_rate', 'Explosive rate', 'Xpl'])) || params.lg.Xpl;
+    const rz = parsePercent(findValue(['Offensive Red Zone TD Rate', 'Offensive RZ TD%', 'RZ_TD_pct', 'RZ TD%', 'RZ'])) || params.lg.RZ;
+
+    // Debug: log what we found
+    console.log(`${team.team || team.Team} Offense - PPD: ${ppd}, EPA: ${epa}, SR: ${sr}`);
+
+    return { ppd, epa, sr, xpl, rz };
+  }
+
+  /**
+   * Extract defensive stats from team data
+   * Handles various column naming conventions
+   */
+  function getTeamDefensiveStats(team) {
+    // Helper to find column value by multiple possible names
+    const findValue = (possibleNames) => {
+      for (let name of possibleNames) {
+        if (team[name] !== undefined && team[name] !== '') {
+          return team[name];
+        }
+      }
+      return null;
+    };
+
+    const ppd_allowed = parseFloat(findValue(['Defensive Pts/Drive', 'Defensive PPD allowed', 'PPD_allowed', 'PPD allowed', 'Def PPD'])) || params.lg.PPD_def;
+    const epa_allowed = parseFloat(findValue(['Defensive EPA/Play', 'Defensive EPA allowed', 'EPA_allowed', 'EPA allowed', 'Def EPA'])) || params.lg.EPA_def;
+    const sr_allowed = parsePercent(findValue(['Defensive Success Rate', 'Defensive Success rate allowed', 'SR_allowed', 'Success rate allowed', 'Def SR'])) || params.lg.SR_def;
+
+    // Debug: log what we found
+    console.log(`${team.team || team.Team} Defense - PPD allowed: ${ppd_allowed}, EPA: ${epa_allowed}, SR: ${sr_allowed}`);
+
+    return { ppd_allowed, epa_allowed, sr_allowed };
+  }
+
+  /**
+   * Generate standard normal random variable (Box-Muller)
+   */
+  function randn() {
+    const u1 = Math.random();
+    const u2 = Math.random();
+    return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  }
+
+  /**
+   * Calculate percentile
+   */
+  function percentile(arr, p) {
+    const sorted = [...arr].sort((a, b) => a - b);
+    const index = (p / 100) * (sorted.length - 1);
+    const lower = Math.floor(index);
+    const upper = Math.ceil(index);
+    const weight = index - lower;
+    return sorted[lower] * (1 - weight) + sorted[upper] * weight;
+  }
+
+  /**
+   * Calculate results from simulation data
+   */
+  function calculateResults(results, settings, homeTeamName, awayTeamName) {
+    const homeScores = results.homeScores;
+    const awayScores = results.awayScores;
+    const totals = results.totals;
+    const margins = results.margins;
+    const n = settings.numSimulations;
+
+    // Over/Under analysis
+    let overCount = 0;
+    let underCount = 0;
+    let pushCount = 0;
+    
+    totals.forEach(total => {
+      if (total > settings.overUnderLine) overCount++;
+      else if (total < settings.overUnderLine) underCount++;
+      else pushCount++;
+    });
+
+    // Home team total
+    let homeOverCount = 0;
+    let homeUnderCount = 0;
+    let homePushCount = 0;
+    
+    homeScores.forEach(score => {
+      if (score > settings.homeTeamTotal) homeOverCount++;
+      else if (score < settings.homeTeamTotal) homeUnderCount++;
+      else homePushCount++;
+    });
+
+    // Away team total
+    let awayOverCount = 0;
+    let awayUnderCount = 0;
+    let awayPushCount = 0;
+    
+    awayScores.forEach(score => {
+      if (score > settings.awayTeamTotal) awayOverCount++;
+      else if (score < settings.awayTeamTotal) awayUnderCount++;
+      else awayPushCount++;
+    });
+
+    // MONEYLINE ANALYSIS
+    let homeWinCount = 0;
+    let awayWinCount = 0;
+    
+    margins.forEach(margin => {
+      if (margin > 0) homeWinCount++;
+      else if (margin < 0) awayWinCount++;
+    });
+
+    const homeMLProb = homeWinCount / n;
+    const awayMLProb = awayWinCount / n;
+
+    // SPREAD ANALYSIS with Alt-Lines
+    const spreadLine = settings.spreadLine;
+    
+    // Main spread line analysis
+    let homeCoverCount = 0;
+    let awayCoverCount = 0;
+    let spreadPushCount = 0;
+    
+    margins.forEach(margin => {
+      const threshold = -spreadLine;
+      
+      if (margin > threshold) {
+        homeCoverCount++;
+      } else if (margin < threshold) {
+        awayCoverCount++;
+      } else {
+        spreadPushCount++;
+      }
+    });
+
+    const coverProb = homeCoverCount / n;
+
+    // Alt-lines analysis
+    const altLines = [-14, -10.5, -7, -6.5, -3.5, -3, -2.5, -1.5, 0, +1.5, +2.5, +3, +3.5, +6.5, +7, +10.5, +14];
+    const altLinesAnalysis = altLines.map(line => {
+      let coverCount = 0;
+      margins.forEach(margin => {
+        if (margin > -line) coverCount++;
+      });
+      const prob = coverCount / n;
+      return {
+        line: line,
+        coverPct: prob * 100,
+      };
+    });
+
+    return {
+      numSimulations: settings.numSimulations,
+      homeTeam: homeTeamName,
+      awayTeam: awayTeamName,
+      correlationUsed: results.correlationUsed,
+      weatherAdjustment: results.weatherAdjustment,
+      
+      overUnder: {
+        line: settings.overUnderLine,
+        overPct: (overCount / n) * 100,
+        underPct: (underCount / n) * 100,
+        pushPct: (pushCount / n) * 100,
+      },
+      
+      homeTeamOverUnder: {
+        line: settings.homeTeamTotal,
+        overPct: (homeOverCount / n) * 100,
+        underPct: (homeUnderCount / n) * 100,
+        pushPct: (homePushCount / n) * 100,
+      },
+      
+      awayTeamOverUnder: {
+        line: settings.awayTeamTotal,
+        overPct: (awayOverCount / n) * 100,
+        underPct: (awayUnderCount / n) * 100,
+        pushPct: (awayPushCount / n) * 100,
+      },
+      
+      // Moneyline
+      moneyline: {
+        homeWinPct: homeMLProb * 100,
+        awayWinPct: awayMLProb * 100,
+        homeFairOdds: toAmericanOdds(homeMLProb),
+        awayFairOdds: toAmericanOdds(awayMLProb),
+      },
+      
+      // Spread analysis
+      spread: {
+        line: spreadLine,
+        homeCoverPct: (homeCoverCount / n) * 100,
+        awayCoverPct: (awayCoverCount / n) * 100,
+        pushPct: (spreadPushCount / n) * 100,
+        altLines: altLinesAnalysis,
+      },
+      
+      homeProjection: {
+        mean: homeScores.reduce((a, b) => a + b, 0) / homeScores.length,
+        median: percentile(homeScores, 50),
+        p10: percentile(homeScores, 10),
+        p90: percentile(homeScores, 90),
+      },
+      
+      awayProjection: {
+        mean: awayScores.reduce((a, b) => a + b, 0) / awayScores.length,
+        median: percentile(awayScores, 50),
+        p10: percentile(awayScores, 10),
+        p90: percentile(awayScores, 90),
+      },
+      
+      totalProjection: {
+        mean: totals.reduce((a, b) => a + b, 0) / totals.length,
+        median: percentile(totals, 50),
+        p10: percentile(totals, 10),
+        p90: percentile(totals, 90),
+      },
+      
+      // Margin projections
+      marginProjection: {
+        mean: margins.reduce((a, b) => a + b, 0) / margins.length,
+        median: percentile(margins, 50),
+        p10: percentile(margins, 10),
+        p90: percentile(margins, 90),
+      },
+    };
+  }
+
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-6">
-      <div className="max-w-6xl mx-auto space-y-6">
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-8">
+      <div className="max-w-7xl mx-auto">
         {/* Header */}
-        <div className="text-center py-6">
-          <h1 className="text-4xl font-extrabold tracking-tight bg-gradient-to-r from-amber-300 to-orange-400 bg-clip-text text-transparent">NFL Totals – Hybrid</h1>
-          <p className="text-slate-300 mt-2 text-sm">Gambletron engine • Weather applied after scoring • Fixed ρ = 0.20</p>
+        <div className="mb-8 text-center">
+          <h1 className="text-5xl font-bold mb-4 bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
+            NFL Totals Monte Carlo Simulator
+          </h1>
+          <p className="text-slate-300 text-lg">Contextual Lambda (0.92-0.96) • Wind Threshold 12mph • Heteroskedastic Noise</p>
         </div>
 
-        {/* Upload */}
-        <div className="bg-slate-800/60 rounded-xl border border-slate-700 p-5">
-          <h2 className="text-lg font-semibold mb-3 flex items-center gap-2"><Upload className="w-5 h-5"/> Upload Team CSV</h2>
-          <input type="file" accept=".csv" onChange={handleFileUpload}
-                 className="block w-full text-sm file:mr-3 file:py-2 file:px-4 file:rounded-md file:border-0 file:bg-amber-500 file:text-black hover:file:bg-amber-400 cursor-pointer"/>
-          {uploadStatus && <p className="mt-2 text-sm text-amber-300">{uploadStatus}</p>}
-        </div>
+        {/* CSV Upload Section */}
+        {!csvUploaded && (
+          <div className="bg-slate-800 rounded-xl p-8 mb-8 border border-slate-700 shadow-2xl">
+            <div className="flex items-center gap-3 mb-6">
+              <Database className="w-8 h-8 text-blue-400" />
+              <h2 className="text-2xl font-bold">Step 1: Upload Team Database</h2>
+            </div>
+            
+            <div className="bg-slate-900/50 rounded-lg p-6 mb-6">
+              <p className="text-slate-300 mb-4">
+                Upload a CSV file containing your NFL team statistics. The app will automatically detect column names with spaces.
+              </p>
+              <div className="text-sm text-slate-400 mb-2">
+                <strong className="text-slate-300">Expected columns (with variations supported):</strong>
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-sm text-slate-400 mb-4">
+                <div>• team / Team</div>
+                <div>• Offensive PPD</div>
+                <div>• Defensive PPD allowed</div>
+                <div>• Offensive EPA/play</div>
+                <div>• Defensive EPA allowed</div>
+                <div>• Offensive Success rate</div>
+                <div>• Defensive Success rate allowed</div>
+                <div>• Offensive Explosive rate</div>
+                <div>• Offensive RZ TD%</div>
+                <div>• Offensive Pass rate</div>
+                <div>• Offensive Sec/snap</div>
+              </div>
+              <p className="text-xs text-slate-500">
+                Note: The app will attempt to match variations of these column names (e.g., "PPD", "Off PPD", "Offensive PPD")
+              </p>
+            </div>
 
-        {/* Controls */}
-        {teamList.length > 0 && (
-          <div className="grid md:grid-cols-2 gap-6">
-            <div className="bg-slate-800/60 rounded-xl border border-slate-700 p-5">
-              <h3 className="text-base font-semibold mb-4 flex items-center gap-2"><BarChart3 className="w-5 h-5"/> Simulation Params</h3>
-              <div className="space-y-3">
+            <label className="flex flex-col items-center justify-center w-full h-64 border-2 border-dashed border-slate-600 rounded-lg cursor-pointer bg-slate-900/30 hover:bg-slate-900/50 transition-all">
+              <div className="flex flex-col items-center justify-center pt-5 pb-6">
+                <Upload className="w-16 h-16 mb-4 text-slate-400" />
+                <p className="mb-2 text-lg font-semibold text-slate-300">
+                  Click to upload CSV file
+                </p>
+                <p className="text-sm text-slate-400">
+                  CSV files only
+                </p>
+              </div>
+              <input
+                type="file"
+                className="hidden"
+                accept=".csv"
+                onChange={handleFileUpload}
+              />
+            </label>
+
+            {uploadError && (
+              <div className="mt-4 p-4 bg-red-900/30 border border-red-700 rounded-lg flex items-start gap-3">
+                <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
                 <div>
-                  <label className="text-xs text-slate-300">Home Team</label>
-                  <select value={homeTeam} onChange={(e)=>setHomeTeam(e.target.value)} className="mt-1 w-full bg-slate-900 border border-slate-700 rounded px-3 py-2">
-                    <option value="">Select Home</option>
-                    {teamList.map(t=> <option key={t} value={t}>{t}</option>)}
-                  </select>
+                  <p className="font-semibold text-red-300">Upload Error</p>
+                  <p className="text-sm text-red-200">{uploadError}</p>
                 </div>
-                <div>
-                  <label className="text-xs text-slate-300">Away Team</label>
-                  <select value={awayTeam} onChange={(e)=>setAwayTeam(e.target.value)} className="mt-1 w-full bg-slate-900 border border-slate-700 rounded px-3 py-2">
-                    <option value="">Select Away</option>
-                    {teamList.map(t=> <option key={t} value={t}>{t}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="text-xs text-slate-300">Simulations</label>
-                  <input type="number" min={2000} max={100000} step={1000} value={numSimulations}
-                         onChange={(e)=>setNumSimulations(parseInt(e.target.value)||10000)}
-                         className="mt-1 w-full bg-slate-900 border border-slate-700 rounded px-3 py-2"/>
-                </div>
-                <div className="grid grid-cols-3 gap-3">
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Main Interface - Only show after CSV upload */}
+        {csvUploaded && (
+          <>
+            {/* Column Debug Info */}
+            {teams.length > 0 && (
+              <div className="bg-slate-800 rounded-xl p-6 mb-6 border border-blue-600/30">
+                <h3 className="text-lg font-bold mb-3 text-blue-400">📊 CSV Loaded Successfully</h3>
+                <div className="grid grid-cols-2 gap-4 text-sm">
                   <div>
-                    <label className="text-xs text-slate-300">Game Total</label>
-                    <input type="number" step="0.5" value={marketTotal} onChange={(e)=>setMarketTotal(e.target.value)}
-                           className="mt-1 w-full bg-slate-900 border border-slate-700 rounded px-3 py-2" placeholder="e.g. 47.5"/>
+                    <span className="text-slate-400">Teams loaded:</span>
+                    <span className="ml-2 text-green-400 font-semibold">{teams.length}</span>
                   </div>
                   <div>
-                    <label className="text-xs text-slate-300">Home Team Total</label>
-                    <input type="number" step="0.5" value={homeTeamTotal} onChange={(e)=>setHomeTeamTotal(e.target.value)}
-                           className="mt-1 w-full bg-slate-900 border border-slate-700 rounded px-3 py-2" placeholder="e.g. 24.5"/>
-                  </div>
-                  <div>
-                    <label className="text-xs text-slate-300">Away Team Total</label>
-                    <input type="number" step="0.5" value={awayTeamTotal} onChange={(e)=>setAwayTeamTotal(e.target.value)}
-                           className="mt-1 w-full bg-slate-900 border border-slate-700 rounded px-3 py-2" placeholder="e.g. 21.0"/>
+                    <span className="text-slate-400">Columns found:</span>
+                    <span className="ml-2 text-green-400 font-semibold">
+                      {teams[0] ? Object.keys(teams[0]).length : 0}
+                    </span>
                   </div>
                 </div>
-                <button onClick={runMonteCarloSimulation} disabled={isSimulating}
-                        className="inline-flex items-center gap-2 bg-amber-500 hover:bg-amber-400 text-black font-semibold px-4 py-2 rounded mt-2">
-                  <Play className="w-4 h-4"/> {isSimulating ? 'Running…' : 'Run Simulation'}
-                </button>
+                <details className="mt-3">
+                  <summary className="text-xs text-slate-400 cursor-pointer hover:text-slate-300">
+                    Show all column names (click to expand)
+                  </summary>
+                  <div className="mt-2 p-3 bg-slate-900/50 rounded text-xs text-slate-400 max-h-40 overflow-y-auto">
+                    {teams[0] && Object.keys(teams[0]).map((col, i) => (
+                      <div key={i} className="py-0.5">• {col}</div>
+                    ))}
+                  </div>
+                </details>
+              </div>
+            )}
+
+            {/* Team Selection */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+              {/* Home Team */}
+              <div className="bg-slate-800 rounded-xl p-6 border border-orange-600/50 shadow-2xl">
+                <h3 className="text-xl font-bold mb-4 text-orange-400 flex items-center gap-2">
+                  <span className="text-2xl">🏠</span> Home Team
+                </h3>
+                <select
+                  className="w-full p-3 bg-slate-900 border border-slate-600 rounded-lg text-white focus:border-orange-400 focus:outline-none"
+                  value={selectedHomeTeam?.Team || ""}
+                  onChange={(e) => {
+                    const team = teams.find(t => t.Team === e.target.value);
+                    setSelectedHomeTeam(team);
+                    console.log("HOME TEAM SELECTED:", team);
+                    console.log("Home team columns:", Object.keys(team));
+                  }}
+                >
+                  <option value="">Select Home Team</option>
+                  {teams.map((team) => (
+                    <option key={team.Team} value={team.Team}>
+                      {team.Team}
+                    </option>
+                  ))}
+                </select>
+                
+                {selectedHomeTeam && (
+                  <div className="mt-4 p-4 bg-slate-900/50 rounded-lg">
+                    <div className="grid grid-cols-2 gap-2 text-sm">
+                      <div className="text-slate-400">PPD:</div>
+                      <div className="text-orange-300 font-semibold">
+                        {getDisplayValue(selectedHomeTeam, [
+                          'Offensive Pts/Drive',
+                          'Offensive PPD',
+                          'PPD',
+                          'Off PPD',
+                          'ppd',
+                          'offensive_ppd'
+                        ])}
+                      </div>
+                      <div className="text-slate-400">EPA/play:</div>
+                      <div className="text-orange-300 font-semibold">
+                        {getDisplayValue(selectedHomeTeam, [
+                          'Offensive EPA/Play',
+                          'Offensive EPA/play',
+                          'EPA/play',
+                          'EPA_play',
+                          'Off EPA',
+                          'offensive_epa'
+                        ])}
+                      </div>
+                      <div className="text-slate-400">Success Rate:</div>
+                      <div className="text-orange-300 font-semibold">
+                        {getDisplayValue(selectedHomeTeam, [
+                          'Offensive Success Rate',
+                          'Offensive Success rate',
+                          'Success_rate',
+                          'Success rate',
+                          'SR',
+                          'offensive_sr'
+                        ])}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => {
+                        console.log("=== HOME TEAM FULL DATA ===");
+                        console.log(selectedHomeTeam);
+                        console.log("All columns:", Object.keys(selectedHomeTeam));
+                        console.log("Sample values:");
+                        Object.keys(selectedHomeTeam).slice(0, 10).forEach(key => {
+                          console.log(`  ${key}: ${selectedHomeTeam[key]}`);
+                        });
+                      }}
+                      className="mt-2 text-xs text-slate-500 hover:text-slate-400 underline"
+                    >
+                      Debug: Log full team data to console
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Away Team */}
+              <div className="bg-slate-800 rounded-xl p-6 border border-purple-600/50 shadow-2xl">
+                <h3 className="text-xl font-bold mb-4 text-purple-400 flex items-center gap-2">
+                  <span className="text-2xl">✈️</span> Away Team
+                </h3>
+                <select
+                  className="w-full p-3 bg-slate-900 border border-slate-600 rounded-lg text-white focus:border-purple-400 focus:outline-none"
+                  value={selectedAwayTeam?.Team || ""}
+                  onChange={(e) => {
+                    const team = teams.find(t => t.Team === e.target.value);
+                    setSelectedAwayTeam(team);
+                  }}
+                >
+                  <option value="">Select Away Team</option>
+                  {teams.map((team) => (
+                    <option key={team.Team} value={team.Team}>
+                      {team.Team}
+                    </option>
+                  ))}
+                </select>
+                
+                {selectedAwayTeam && (
+                  <div className="mt-4 p-4 bg-slate-900/50 rounded-lg">
+                    <div className="grid grid-cols-2 gap-2 text-sm">
+                      <div className="text-slate-400">PPD:</div>
+                      <div className="text-purple-300 font-semibold">
+                        {getDisplayValue(selectedAwayTeam, [
+                          'Offensive Pts/Drive',
+                          'Offensive PPD',
+                          'PPD',
+                          'Off PPD',
+                          'ppd',
+                          'offensive_ppd'
+                        ])}
+                      </div>
+                      <div className="text-slate-400">EPA/play:</div>
+                      <div className="text-purple-300 font-semibold">
+                        {getDisplayValue(selectedAwayTeam, [
+                          'Offensive EPA/Play',
+                          'Offensive EPA/play',
+                          'EPA/play',
+                          'EPA_play',
+                          'Off EPA',
+                          'offensive_epa'
+                        ])}
+                      </div>
+                      <div className="text-slate-400">Success Rate:</div>
+                      <div className="text-purple-300 font-semibold">
+                        {getDisplayValue(selectedAwayTeam, [
+                          'Offensive Success Rate',
+                          'Offensive Success rate',
+                          'Success_rate',
+                          'Success rate',
+                          'SR',
+                          'offensive_sr'
+                        ])}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => console.log("Away team full data:", selectedAwayTeam)}
+                      className="mt-2 text-xs text-slate-500 hover:text-slate-400 underline"
+                    >
+                      Debug: Log full team data to console
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
 
-            <div className="bg-slate-800/60 rounded-xl border border-slate-700 p-5">
-             <h3 className="text-base font-semibold mb-4 flex items-center gap-2"><Wind className="w-5 h-5"/> Weather (post-hoc)</h3>
-              <div className="grid grid-cols-2 gap-3">
-                <label className="flex items-center gap-2 col-span-2">
-                  <input type="checkbox" checked={weather.isDome} onChange={(e)=>setWeather({...weather, isDome: e.target.checked})}/>
-                  <span className="text-sm">Dome (adds +{weatherParams.dome_bonus_total} total points)</span>
-                </label>
+            {/* Game Settings */}
+            <div className="bg-slate-800 rounded-xl p-6 mb-8 border border-slate-700 shadow-2xl">
+              <h3 className="text-xl font-bold mb-6 flex items-center gap-2">
+                <BarChart3 className="w-6 h-6 text-blue-400" />
+                Game Settings
+              </h3>
+              
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                {/* Betting Lines */}
                 <div>
-                  <label className="text-xs text-slate-300 flex items-center gap-1"><Sun className="w-4 h-4"/> Wind (mph)</label>
-                  <input type="number" min={0} max={40} value={weather.windMPH}
-                         onChange={(e)=>setWeather({...weather, windMPH: parseFloat(e.target.value)||0})}
-                         className="mt-1 w-full bg-slate-900 border border-slate-700 rounded px-3 py-2"/>
+                  <label className="block text-sm font-medium text-slate-300 mb-2">
+                    Over/Under Line
+                  </label>
+                  <input
+                    type="number"
+                    step="0.5"
+                    className="w-full p-3 bg-slate-900 border border-slate-600 rounded-lg text-white focus:border-blue-400 focus:outline-none"
+                    value={gameSettings.overUnderLine}
+                    onChange={(e) => setGameSettings({...gameSettings, overUnderLine: parseFloat(e.target.value)})}
+                  />
                 </div>
+
+                {/* Weather Settings */}
                 <div>
-                  <label className="text-xs text-slate-300 flex items-center gap-1"><Thermometer className="w-4 h-4"/> Temp (°F)</label>
-                  <input type="number" value={weather.temperatureF}
-                         onChange={(e)=>setWeather({...weather, temperatureF: parseFloat(e.target.value)||68})}
-                         className="mt-1 w-full bg-slate-900 border border-slate-700 rounded px-3 py-2"/>
+                  <label className="block text-sm font-medium text-slate-300 mb-2">
+                    Wind Speed (MPH)
+                  </label>
+                  <input
+                    type="number"
+                    className="w-full p-3 bg-slate-900 border border-slate-600 rounded-lg text-white focus:border-blue-400 focus:outline-none"
+                    value={gameSettings.windMPH}
+                    onChange={(e) => setGameSettings({...gameSettings, windMPH: parseInt(e.target.value)})}
+                  />
                 </div>
-                <div className="col-span-2">
-                  <label className="text-xs text-slate-300 flex items-center gap-1"><CloudRain className="w-4 h-4"/> Precipitation</label>
-                  <select value={weather.precipitation} onChange={(e)=>setWeather({...weather, precipitation: e.target.value})}
-                          className="mt-1 w-full bg-slate-900 border border-slate-700 rounded px-3 py-2">
+
+                <div>
+                  <label className="block text-sm font-medium text-slate-300 mb-2">
+                    Temperature (°F)
+                  </label>
+                  <input
+                    type="number"
+                    className="w-full p-3 bg-slate-900 border border-slate-600 rounded-lg text-white focus:border-blue-400 focus:outline-none"
+                    value={gameSettings.temperature}
+                    onChange={(e) => setGameSettings({...gameSettings, temperature: parseInt(e.target.value)})}
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-slate-300 mb-2">
+                    Precipitation
+                  </label>
+                  <select
+                    className="w-full p-3 bg-slate-900 border border-slate-600 rounded-lg text-white focus:border-blue-400 focus:outline-none"
+                    value={gameSettings.precipitation}
+                    onChange={(e) => setGameSettings({...gameSettings, precipitation: e.target.value})}
+                  >
                     <option value="none">None</option>
                     <option value="light_rain">Light Rain</option>
                     <option value="heavy_rain">Heavy Rain</option>
                     <option value="snow">Snow</option>
                   </select>
                 </div>
-                <div className="col-span-2 text-xs text-slate-400">
-                  <p>Wind threshold: {weatherParams.wind_threshold_mph} mph (penalty above that: {weatherParams.wind_per_mph_above_threshold_total} per mph, total)</p>
+
+                {/* Other Settings */}
+                <div>
+                  <label className="block text-sm font-medium text-slate-300 mb-2">
+                    # of Simulations
+                  </label>
+                  <input
+                    type="number"
+                    step="1000"
+                    className="w-full p-3 bg-slate-900 border border-slate-600 rounded-lg text-white focus:border-blue-400 focus:outline-none"
+                    value={gameSettings.numSimulations}
+                    onChange={(e) => setGameSettings({...gameSettings, numSimulations: parseInt(e.target.value)})}
+                  />
+                </div>
+
+                <div className="flex items-end">
+                  <label className="flex items-center gap-3 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="w-5 h-5 rounded bg-slate-900 border-slate-600 text-blue-500 focus:ring-blue-400"
+                      checked={gameSettings.isDome}
+                      onChange={(e) => setGameSettings({...gameSettings, isDome: e.target.checked})}
+                    />
+                    <div>
+                      <span className="text-slate-300 font-medium">Dome Game</span>
+                      <p className="text-xs text-slate-500">+1.5 pts (removes weather drag)</p>
+                    </div>
+                  </label>
                 </div>
               </div>
-            </div>
-          </div>
-        )}
 
-        {/* Results */}
-        {simulationResults && (
-          <div className="bg-slate-800/60 rounded-xl border border-slate-700 p-5">
-            <h3 className="text-lg font-semibold mb-2">Results: {simulationResults.awayTeam} @ {simulationResults.homeTeam}</h3>
-            <p className="text-sm text-slate-300 mb-4">Weather applied post‑hoc — total delta: <span className="font-semibold">{simulationResults.weatherUsed.totalDelta.toFixed(2)}</span> (split evenly)</p>
-
-            <div className="grid md:grid-cols-3 gap-4 text-sm">
-              <div className="bg-slate-900/50 rounded p-3 border border-slate-700">
-                <h4 className="font-semibold mb-2">Home Projection</h4>
-                <div>Mean: {simulationResults.homeProjection.mean.toFixed(1)}</div>
-                <div>Median: {simulationResults.homeProjection.median.toFixed(0)}</div>
-                <div>P10–P90: {simulationResults.homeProjection.p10.toFixed(0)}–{simulationResults.homeProjection.p90.toFixed(0)}</div>
-              </div>
-              <div className="bg-slate-900/50 rounded p-3 border border-slate-700">
-                <h4 className="font-semibold mb-2">Away Projection</h4>
-                <div>Mean: {simulationResults.awayProjection.mean.toFixed(1)}</div>
-                <div>Median: {simulationResults.awayProjection.median.toFixed(0)}</div>
-                <div>P10–P90: {simulationResults.awayProjection.p10.toFixed(0)}–{simulationResults.awayProjection.p90.toFixed(0)}</div>
-              </div>
-              <div className="bg-slate-900/50 rounded p-3 border border-slate-700">
-                <h4 className="font-semibold mb-2">Total Projection</h4>
-                <div>Mean: {simulationResults.totalProjection.mean.toFixed(1)}</div>
-                <div>Median: {simulationResults.totalProjection.median.toFixed(0)}</div>
-                <div>P10–P90: {simulationResults.totalProjection.p10.toFixed(0)}–{simulationResults.totalProjection.p90.toFixed(0)}</div>
-              </div>
+              {/* Run Simulation Button */}
+              <button
+                onClick={runSimulation}
+                disabled={!selectedHomeTeam || !selectedAwayTeam || isSimulating}
+                className="mt-6 w-full bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 disabled:from-slate-600 disabled:to-slate-700 text-white font-bold py-4 px-6 rounded-lg flex items-center justify-center gap-3 transition-all shadow-lg"
+              >
+                <Play className="w-6 h-6" />
+                {isSimulating ? "Simulating..." : `Run ${gameSettings.numSimulations.toLocaleString()} Simulations`}
+              </button>
             </div>
 
-            {(simulationResults.overUnder) && (
-              <div className="mt-4 text-sm">
-                <h4 className="font-semibold mb-2">Over/Under @ {simulationResults.overUnder.line}</h4>
-                <div className="grid grid-cols-3 gap-3">
-                  <div className="bg-slate-900/50 rounded p-3 border border-slate-700">Over: {simulationResults.overUnder.overPct.toFixed(1)}%</div>
-                  <div className="bg-slate-900/50 rounded p-3 border border-slate-700">Under: {simulationResults.overUnder.underPct.toFixed(1)}%</div>
-                  <div className="bg-slate-900/50 rounded p-3 border border-slate-700">Push: {simulationResults.overUnder.pushPct.toFixed(1)}%</div>
+            {/* Results Section */}
+            {simulationResults && (
+              <div className="space-y-6">
+                {/* Model Info */}
+                <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
+                  <h3 className="text-xl font-bold mb-4">Simulation Parameters</h3>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                    <div>
+                      <div className="text-slate-400">Correlation (ρ)</div>
+                      <div className="text-blue-400 font-bold text-lg">{simulationResults.correlationUsed.toFixed(3)}</div>
+                    </div>
+                    <div>
+                      <div className="text-slate-400">Weather Impact</div>
+                      <div className="text-blue-400 font-bold text-lg">
+                        {simulationResults.weatherAdjustment >= 0 ? '+' : ''}{simulationResults.weatherAdjustment.toFixed(1)} pts
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        ({simulationResults.weatherAdjustment >= 0 ? '+' : ''}{(simulationResults.weatherAdjustment * 0.5).toFixed(1)} per team)
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-slate-400">Simulations</div>
+                      <div className="text-blue-400 font-bold text-lg">{simulationResults.numSimulations.toLocaleString()}</div>
+                    </div>
+                    <div>
+                      <div className="text-slate-400">Database</div>
+                      <div className="text-blue-400 font-bold text-lg">{teams.length} Teams</div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Game Total O/U */}
+                <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
+                  <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
+                    <TrendingUp className="w-6 h-6 text-blue-400" />
+                    Over/Under Analysis (Line: {simulationResults.overUnder.line})
+                  </h3>
+                  <div className="grid grid-cols-3 gap-4">
+                    <div className="bg-gradient-to-br from-green-600/20 to-green-800/20 p-4 rounded-lg border border-green-600/30">
+                      <div className="text-sm text-green-300 mb-1">Over {simulationResults.overUnder.line}</div>
+                      <div className="text-3xl font-bold text-green-400">
+                        {simulationResults.overUnder.overPct.toFixed(1)}%
+                      </div>
+                      <div className="text-xs text-green-300 mt-1">
+                        {Math.round((simulationResults.overUnder.overPct / 100) * simulationResults.numSimulations).toLocaleString()} times
+                      </div>
+                    </div>
+                    <div className="bg-gradient-to-br from-red-600/20 to-red-800/20 p-4 rounded-lg border border-red-600/30">
+                      <div className="text-sm text-red-300 mb-1">Under {simulationResults.overUnder.line}</div>
+                      <div className="text-3xl font-bold text-red-400">
+                        {simulationResults.overUnder.underPct.toFixed(1)}%
+                      </div>
+                      <div className="text-xs text-red-300 mt-1">
+                        {Math.round((simulationResults.overUnder.underPct / 100) * simulationResults.numSimulations).toLocaleString()} times
+                      </div>
+                    </div>
+                    <div className="bg-gradient-to-br from-slate-600/20 to-slate-800/20 p-4 rounded-lg border border-slate-600/30">
+                      <div className="text-sm text-slate-300 mb-1">Push</div>
+                      <div className="text-3xl font-bold text-slate-400">
+                        {simulationResults.overUnder.pushPct.toFixed(1)}%
+                      </div>
+                      <div className="text-xs text-slate-300 mt-1">
+                        {Math.round((simulationResults.overUnder.pushPct / 100) * simulationResults.numSimulations).toLocaleString()} times
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Moneyline Analysis */}
+                {simulationResults.moneyline && (
+                  <div className="bg-slate-800 p-6 rounded-lg border border-emerald-700/50">
+                    <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
+                      <TrendingUp className="w-6 h-6 text-emerald-400" />
+                      Moneyline (Win Probability)
+                    </h3>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="bg-gradient-to-br from-orange-600/20 to-orange-800/20 p-4 rounded-lg border border-orange-600/30">
+                        <div className="text-sm text-orange-300 mb-1">{simulationResults.homeTeam} Win</div>
+                        <div className="text-3xl font-bold text-orange-400">
+                          {simulationResults.moneyline.homeWinPct.toFixed(1)}%
+                        </div>
+                        <div className="text-sm text-orange-300 mt-2">
+                          Fair Odds: {simulationResults.moneyline.homeFairOdds > 0 ? '+' : ''}{simulationResults.moneyline.homeFairOdds}
+                        </div>
+                        <div className="text-xs text-slate-400 mt-1">
+                          Implied prob: {simulationResults.moneyline.homeWinPct.toFixed(1)}%
+                        </div>
+                      </div>
+                      <div className="bg-gradient-to-br from-purple-600/20 to-purple-800/20 p-4 rounded-lg border border-purple-600/30">
+                        <div className="text-sm text-purple-300 mb-1">{simulationResults.awayTeam} Win</div>
+                        <div className="text-3xl font-bold text-purple-400">
+                          {simulationResults.moneyline.awayWinPct.toFixed(1)}%
+                        </div>
+                        <div className="text-sm text-purple-300 mt-2">
+                          Fair Odds: {simulationResults.moneyline.awayFairOdds > 0 ? '+' : ''}{simulationResults.moneyline.awayFairOdds}
+                        </div>
+                        <div className="text-xs text-slate-400 mt-1">
+                          Implied prob: {simulationResults.moneyline.awayWinPct.toFixed(1)}%
+                        </div>
+                      </div>
+                    </div>
+                    <div className="mt-3 text-xs text-slate-500 bg-slate-900/50 p-3 rounded">
+                      <strong>Note:</strong> Fair odds assume no vig. Actual sportsbook lines will be juiced (typically -110 both sides on spread, varies on ML).
+                      Compare these fair odds to market prices to identify value.
+                    </div>
+                  </div>
+                )}
+
+                {/* Projected Scores */}
+                <div className="bg-slate-800 p-6 rounded-lg border border-slate-700">
+                  <h3 className="text-xl font-bold mb-4">Projected Scores</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                      <div className="text-sm text-orange-300 mb-2 font-semibold">{simulationResults.homeTeam}</div>
+                      <div className="text-4xl font-bold text-orange-400 mb-2">
+                        {simulationResults.homeProjection.mean.toFixed(1)}
+                      </div>
+                      <div className="text-xs text-slate-400 space-y-1">
+                        <div>Median: {simulationResults.homeProjection.median.toFixed(1)}</div>
+                        <div>10th %: {simulationResults.homeProjection.p10.toFixed(1)}</div>
+                        <div>90th %: {simulationResults.homeProjection.p90.toFixed(1)}</div>
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="text-sm text-purple-300 mb-2 font-semibold">{simulationResults.awayTeam}</div>
+                      <div className="text-4xl font-bold text-purple-400 mb-2">
+                        {simulationResults.awayProjection.mean.toFixed(1)}
+                      </div>
+                      <div className="text-xs text-slate-400 space-y-1">
+                        <div>Median: {simulationResults.awayProjection.median.toFixed(1)}</div>
+                        <div>10th %: {simulationResults.awayProjection.p10.toFixed(1)}</div>
+                        <div>90th %: {simulationResults.awayProjection.p90.toFixed(1)}</div>
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="text-sm text-blue-300 mb-2 font-semibold">Game Total</div>
+                      <div className="text-4xl font-bold text-blue-400 mb-2">
+                        {simulationResults.totalProjection.mean.toFixed(1)}
+                      </div>
+                      <div className="text-xs text-slate-400 space-y-1">
+                        <div>Median: {simulationResults.totalProjection.median.toFixed(1)}</div>
+                        <div>10th %: {simulationResults.totalProjection.p10.toFixed(1)}</div>
+                        <div>90th %: {simulationResults.totalProjection.p90.toFixed(1)}</div>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
             )}
-
-            <div className="mt-6 text-xs text-slate-400">
-              <p>Engine: Gambletron core (PPD z-scores, pace-derived drives, zero-sum turnovers, fixed ρ=0.20, EV_SD_Total={params.EV_SD_Total}). Weather applied after expected team points are computed.</p>
-            </div>
-          </div>
+          </>
         )}
       </div>
     </div>
-  )
-}
+  );
+};
+
+export default NFLTotalsSimulator;
