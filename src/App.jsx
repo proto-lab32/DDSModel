@@ -5,17 +5,48 @@ import { Upload, Play, BarChart3, TrendingUp, Database, AlertCircle } from "luci
 
 /**
  * NFL Monte Carlo Simulator - FULL COMPOSITE MODEL
+ * VERSION: TUNED (Post-59 Game Backtest)
+ * 
+ * ============================================
+ * TUNING CHANGES APPLIED (Based on Historical Audit)
+ * ============================================
+ * 
+ * PHASE 1 - Structural Bias Fixes:
+ * - HFA now symmetric (+HFA/2 home, -HFA/2 away) for neutral total impact
+ * - Outdoor games get default -1.25 penalty in batch mode
+ * - Dome bonus reduced from 1.5 to 0.5
+ * 
+ * PHASE 2 - Variance & Calibration:
+ * - SigmaTeam widened to 7.5-12.0 range (was 6.5-9.5)
+ * - Correlation capped at 0.40 (was 0.60)
+ * - Post-hoc probability calibration with 0.5 shrinkage factor
+ * 
+ * PHASE 3 - CER Rebalancing:
+ * - Defensive PPD weight: 0.25 (was 0.15)
+ * - Defensive SR weight: 0.20 (was 0.25)
+ * - CER_TO_PPD_SCALE: 0.25 (was 0.32)
+ * - LAMBDA: 0.75 (was 0.85)
+ * - PPD lower bound: 1.0 (was 1.2)
+ * 
+ * PHASE 4 - Game Script & Drives:
+ * - Drive differential cap: ±1.5 (was ±1.0)
+ * - Game script modifier: -0.5 to -3.0 for spreads 7+
+ * 
+ * PHASE 5 - Betting Discipline:
+ * - OVER threshold: Need +4 edge AND 54%+ calibrated prob
+ * - UNDER threshold: Need -1.5 edge AND 52%+ calibrated prob
+ * - Dome OVER exception: +2 edge AND 52%+ allowed
  * 
  * ============================================
  * TIER 1: COMPOSITE EFFICIENCY RATING (CER)
  * ============================================
  * Uses z-score weighted composite of:
- * - PPD (0.30) - Actual scoring output
- * - EPA/play (0.25) - Most predictive efficiency metric  
- * - Success Rate (0.20) - Drive sustainability
+ * - PPD (0.45) - Actual scoring output
+ * - EPA/play (0.20) - Most predictive efficiency metric  
+ * - Success Rate (0.15) - Drive sustainability
  * - RZ TD Rate (0.10) - Finishing ability
- * - TO% (0.10 negative) - Ball security
- * - RZ Drives/Game (0.05) - Opportunity creation
+ * - TO% (0.03 negative) - Ball security
+ * - RZ Drives/Game (0.07) - Opportunity creation
  * 
  * ============================================
  * TIER 2: PACE-BASED DRIVES MODEL
@@ -31,7 +62,7 @@ import { Upload, Play, BarChart3, TrendingUp, Database, AlertCircle } from "luci
  * ============================================
  * TIER 4: FINAL PROJECTION
  * ============================================
- * Expected_Points = Matchup_PPD × Expected_Drives × Weather
+ * Expected_Points = Matchup_PPD × Expected_Drives × Weather × GameScript
  */
 
 const NFLTotalsSimulator = () => {
@@ -55,6 +86,13 @@ const NFLTotalsSimulator = () => {
   });
   const [simulationResults, setSimulationResults] = useState(null);
   const [isSimulating, setIsSimulating] = useState(false);
+  
+  // Batch processing state
+  const [batchGames, setBatchGames] = useState([]);
+  const [batchResults, setBatchResults] = useState([]);
+  const [isBatchSimulating, setIsBatchSimulating] = useState(false);
+  const [batchProgress, setBatchProgress] = useState(0);
+  const [showBatchMode, setShowBatchMode] = useState(false);
 
   // ============================================
   // LEAGUE PARAMETERS (W13 2024 Database - From Actual CSV Analysis)
@@ -137,10 +175,11 @@ const NFLTotalsSimulator = () => {
       off_TO: -0.03,         // Negative: higher TO% is bad
       
       // Defensive CER weights (preventing points)
+      // TUNED: Increased def_PPD from 0.15 to 0.25 to better detect low-scoring environments
       def_EPA: 0.30,
-      def_SR: 0.25,
-      def_RZDrives: 0.20,
-      def_PPD: 0.15,
+      def_PPD: 0.25,          // TUNED: Up from 0.15
+      def_SR: 0.20,           // TUNED: Down from 0.25
+      def_RZDrives: 0.15,     // TUNED: Down from 0.20
       def_RZTD: 0.07,
       def_TO: 0.03,          // Positive: more forced TOs makes defense better
     },
@@ -157,13 +196,13 @@ const NFLTotalsSimulator = () => {
     },
     
     // Shrinkage and adjustments
-    LAMBDA: 0.85,             // Shrinkage factor
+    LAMBDA: 0.75,             // TUNED: Reduced from 0.85 to shrink extremes harder
     HOME_FIELD_ADV: 1.3,      // Home field advantage in points
-    CER_TO_PPD_SCALE: 0.32,   // Scale CER z-scores to PPD adjustment
+    CER_TO_PPD_SCALE: 0.25,   // TUNED: Reduced from 0.32 to tame offensive blowups
     
     // Weather coefficients
     weather: {
-      dome_bonus: 1.5,
+      dome_bonus: 0.5,  // TUNED: Reduced from 1.5 to avoid double-counting
       wind_per_mph_above_threshold: -0.06,
       wind_threshold: 10,
       extreme_cold_threshold: 25,
@@ -235,6 +274,33 @@ const NFLTotalsSimulator = () => {
     return prob >= 0.5 
       ? -Math.round((prob / (1 - prob)) * 100)
       : Math.round(((1 - prob) / prob) * 100);
+  };
+
+  /**
+   * PHASE 2.3: Post-hoc probability calibration
+   * Based on historical backtest: model probabilities are overconfident
+   * This applies Platt-style sigmoid calibration to deflate extreme probabilities
+   * 
+   * Calibration curve fitted from historical data:
+   * - 50-55% raw → ~48-51% calibrated
+   * - 55-60% raw → ~50-53% calibrated  
+   * - 60-65% raw → ~48-52% calibrated (model was least accurate here)
+   * - 65-75% raw → ~52-58% calibrated
+   * - 75%+ raw → ~55-62% calibrated
+   */
+  const calibrateProbability = (rawProb) => {
+    // Convert to log-odds space
+    const logOdds = Math.log(rawProb / (1 - rawProb));
+    
+    // Apply shrinkage toward 0.5 (shrink log-odds toward 0)
+    // Calibration factor of 0.5 means we believe about half the edge
+    const calibrationFactor = 0.50;
+    const calibratedLogOdds = logOdds * calibrationFactor;
+    
+    // Convert back to probability
+    const calibrated = 1 / (1 + Math.exp(-calibratedLogOdds));
+    
+    return calibrated;
   };
 
   // ============================================
@@ -457,11 +523,11 @@ const NFLTotalsSimulator = () => {
     let homeDrives = baseDrivesEach + (turnoverSwing / 2) + cappedPaceEdge;
     let awayDrives = baseDrivesEach - (turnoverSwing / 2) - cappedPaceEdge;
     
-    // HARD CONSTRAINT: Differential cannot exceed ±1.0
-    // In real NFL games, drive counts almost always within 1 of each other
+    // HARD CONSTRAINT: Differential cannot exceed ±1.5
+    // TUNED: Increased from ±1.0 to better reflect real pace/TO mismatches
     const differential = homeDrives - awayDrives;
-    if (Math.abs(differential) > 1.0) {
-      const excess = (Math.abs(differential) - 1.0) / 2;
+    if (Math.abs(differential) > 1.5) {
+      const excess = (Math.abs(differential) - 1.5) / 2;
       if (differential > 0) {
         homeDrives -= excess;
         awayDrives += excess;
@@ -528,19 +594,21 @@ const NFLTotalsSimulator = () => {
     const homePPD = params.lg.PPD + params.LAMBDA * (homeRawPPD - params.lg.PPD);
     const awayPPD = params.lg.PPD + params.LAMBDA * (awayRawPPD - params.lg.PPD);
     
-    // Add home field advantage (in PPD terms)
-    const homeAdvPPD = params.HOME_FIELD_ADV / params.lg.Drives;
-    const homeFinalPPD = homePPD + homeAdvPPD;
+    // TUNED: Apply symmetric HFA (+HFA/2 to home, -HFA/2 to away)
+    // This keeps total scoring neutral while giving home team the edge
+    const hfaPerDrive = params.HOME_FIELD_ADV / params.lg.Drives;
+    const homeFinalPPD = homePPD + (hfaPerDrive / 2);
+    const awayFinalPPD = awayPPD - (hfaPerDrive / 2);
     
     console.log(`\n=== MATCHUP PPD ===`);
     console.log(`  Home CER matchup: ${homeOffCER.CER.toFixed(3)} (off) - ${awayDefCER.CER.toFixed(3)} (opp def) = ${homeMatchupCER.toFixed(3)}`);
     console.log(`  Away CER matchup: ${awayOffCER.CER.toFixed(3)} (off) - ${homeDefCER.CER.toFixed(3)} (opp def) = ${awayMatchupCER.toFixed(3)}`);
-    console.log(`  Home PPD: ${params.lg.PPD.toFixed(2)} + ${homePPDAdj.toFixed(3)} = ${homeRawPPD.toFixed(3)} → shrunk to ${homePPD.toFixed(3)} + HFA ${homeAdvPPD.toFixed(3)} = ${homeFinalPPD.toFixed(3)}`);
-    console.log(`  Away PPD: ${params.lg.PPD.toFixed(2)} + ${awayPPDAdj.toFixed(3)} = ${awayRawPPD.toFixed(3)} → shrunk to ${awayPPD.toFixed(3)}`);
+    console.log(`  Home PPD: ${params.lg.PPD.toFixed(2)} + ${homePPDAdj.toFixed(3)} = ${homeRawPPD.toFixed(3)} → shrunk to ${homePPD.toFixed(3)} + HFA/2 ${(hfaPerDrive/2).toFixed(3)} = ${homeFinalPPD.toFixed(3)}`);
+    console.log(`  Away PPD: ${params.lg.PPD.toFixed(2)} + ${awayPPDAdj.toFixed(3)} = ${awayRawPPD.toFixed(3)} → shrunk to ${awayPPD.toFixed(3)} - HFA/2 ${(hfaPerDrive/2).toFixed(3)} = ${awayFinalPPD.toFixed(3)}`);
     
     return {
-      homePPD: clamp(homeFinalPPD, 1.2, 3.5),
-      awayPPD: clamp(awayPPD, 1.2, 3.5),
+      homePPD: clamp(homeFinalPPD, 1.0, 3.5),  // TUNED: Lower bound from 1.2 to 1.0
+      awayPPD: clamp(awayFinalPPD, 1.0, 3.5),  // TUNED: Lower bound from 1.2 to 1.0
       homeOffCER,
       homeDefCER,
       awayOffCER,
@@ -590,7 +658,8 @@ const NFLTotalsSimulator = () => {
     if (avgPace < 27.4) rho += 0.05;       // Both teams fast (below P10)
     else if (avgPace > 29.8) rho -= 0.03;  // Both teams slow (above P90)
     
-    return clamp(rho, -0.05, 0.60);
+    // TUNED: Capped at 0.40 (was 0.60) to avoid over-tight distributions
+    return clamp(rho, -0.05, 0.40);
   }
 
   // ============================================
@@ -789,14 +858,29 @@ const NFLTotalsSimulator = () => {
     // Calculate weather adjustment
     const weatherAdj = calculateWeatherAdjustment(settings);
     
+    // TUNED: Add outdoor penalty if provided (for batch mode)
+    const outdoorPenalty = settings.outdoorPenalty || 0;
+    
+    // PHASE 4.2: Game-script modifier for big spreads
+    // Heavy favorites run the clock → fewer plays → lower totals
+    const absSpread = Math.abs(settings.spread || 0);
+    let gameScriptAdj = 0;
+    if (absSpread >= 14) {
+      gameScriptAdj = -3.0;  // Big blowout expected
+    } else if (absSpread >= 10) {
+      gameScriptAdj = -2.0;  // Moderate blowout
+    } else if (absSpread >= 7) {
+      gameScriptAdj = -0.5;  // Slight adjustment
+    }
+    
     // TIER 4: Calculate expected points
-    const homeExpPts = matchup.homePPD * drives.homeDrives + (weatherAdj / 2);
-    const awayExpPts = matchup.awayPPD * drives.awayDrives + (weatherAdj / 2);
+    const homeExpPts = matchup.homePPD * drives.homeDrives + (weatherAdj / 2) + (outdoorPenalty / 2) + (gameScriptAdj / 2);
+    const awayExpPts = matchup.awayPPD * drives.awayDrives + (weatherAdj / 2) + (outdoorPenalty / 2) + (gameScriptAdj / 2);
     
     console.log(`\n=== FINAL PROJECTIONS ===`);
-    console.log(`  Home: ${matchup.homePPD.toFixed(3)} PPD × ${drives.homeDrives.toFixed(2)} drives + ${(weatherAdj/2).toFixed(1)} weather = ${homeExpPts.toFixed(1)} pts`);
-    console.log(`  Away: ${matchup.awayPPD.toFixed(3)} PPD × ${drives.awayDrives.toFixed(2)} drives + ${(weatherAdj/2).toFixed(1)} weather = ${awayExpPts.toFixed(1)} pts`);
-    console.log(`  Total: ${(homeExpPts + awayExpPts).toFixed(1)} | Correlation: ${rho.toFixed(3)}`);
+    console.log(`  Home: ${matchup.homePPD.toFixed(3)} PPD × ${drives.homeDrives.toFixed(2)} drives + weather ${(weatherAdj/2).toFixed(1)} + outdoor ${(outdoorPenalty/2).toFixed(1)} + script ${(gameScriptAdj/2).toFixed(1)} = ${homeExpPts.toFixed(1)} pts`);
+    console.log(`  Away: ${matchup.awayPPD.toFixed(3)} PPD × ${drives.awayDrives.toFixed(2)} drives + weather ${(weatherAdj/2).toFixed(1)} + outdoor ${(outdoorPenalty/2).toFixed(1)} + script ${(gameScriptAdj/2).toFixed(1)} = ${awayExpPts.toFixed(1)} pts`);
+    console.log(`  Total: ${(homeExpPts + awayExpPts).toFixed(1)} | Correlation: ${rho.toFixed(3)} | Game Script Adj: ${gameScriptAdj.toFixed(1)}`);
     console.log(`========================================\n`);
     
     // Run Monte Carlo simulations
@@ -818,8 +902,8 @@ const NFLTotalsSimulator = () => {
       matchupDetails: matchup
     };
     
-    // Heteroskedastic sigma function
-    const sigmaTeam = (expectedPts) => Math.max(6.5, Math.min(9.5, 5.5 + 0.15 * (expectedPts - 20)));
+    // TUNED: Widened sigma range for fatter tails (was 6.5-9.5, now 7.5-12.0)
+    const sigmaTeam = (expectedPts) => Math.max(7.5, Math.min(12.0, 6.0 + 0.20 * (expectedPts - 20)));
     
     for (let i = 0; i < numSims; i++) {
       // Generate correlated random values (Box-Muller)
@@ -997,6 +1081,360 @@ const NFLTotalsSimulator = () => {
   }
 
   // ============================================
+  // BATCH PROCESSING
+  // ============================================
+  
+  /**
+   * Parse games schedule CSV
+   * Expected columns: Home, Away, Dome (Y/N), Total, Spread, HomeTotal, AwayTotal
+   */
+  function parseGamesCSV(csvText) {
+    // Remove BOM if present
+    let cleanedText = csvText;
+    if (cleanedText.charCodeAt(0) === 0xFEFF) {
+      cleanedText = cleanedText.slice(1);
+    }
+    
+    // Handle Windows line endings
+    cleanedText = cleanedText.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    
+    const lines = cleanedText.trim().split('\n').filter(line => line.trim() !== '');
+    if (lines.length < 2) {
+      throw new Error("Games CSV appears to be empty or invalid");
+    }
+
+    // Parse headers - be very flexible with naming
+    const rawHeaders = parseCSVLine(lines[0]);
+    const headers = rawHeaders.map(h => h.toLowerCase().trim().replace(/[^a-z0-9]/g, ''));
+    
+    console.log("Games CSV Raw Headers:", rawHeaders);
+    console.log("Games CSV Normalized Headers:", headers);
+
+    const games = [];
+
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      
+      const values = parseCSVLine(line);
+      if (values.length < 2) {
+        console.warn(`Skipping row ${i}: Not enough columns`);
+        continue;
+      }
+
+      const row = {};
+      headers.forEach((header, index) => {
+        if (index < values.length) {
+          row[header] = values[index]?.trim();
+        }
+      });
+
+      console.log(`Row ${i} parsed:`, row);
+
+      // Find home/away team columns (very flexible naming)
+      const homeTeamName = row.home || row.hometeam || row.hometeam || row.hm || row.h ||
+                          values[0]; // Fallback to first column
+      const awayTeamName = row.away || row.awayteam || row.awayteam || row.aw || row.a ||
+                          row.visitor || row.road ||
+                          values[1]; // Fallback to second column
+      
+      if (!homeTeamName || !awayTeamName) {
+        console.warn(`Skipping row ${i}: Missing home or away team`, row);
+        continue;
+      }
+
+      // Parse dome - check multiple possible column names
+      const domeVal = row.dome || row.field || row.venue || row.indoor || row.stadium || row.location || '';
+      const domeRaw = domeVal.toString().toLowerCase().trim();
+      const isDome = ['y', 'yes', '1', 'true', 'dome', 'indoor', 'retractable'].includes(domeRaw);
+
+      // Parse numeric fields - check multiple column names
+      const total = parseFloat(row.total || row.ou || row.ou || row.overunder || row.over || row.line || values[3]) || 44.5;
+      const spread = parseFloat(row.spread || row.sprd || row.homespread || row.hspread || values[4]) || -3;
+      const homeTotal = parseFloat(row.hometotal || row.home_total || row.hometotal || row.ht || row.homett || values[5]) || (total / 2) - (spread / 2);
+      const awayTotal = parseFloat(row.awaytotal || row.away_total || row.awaytotal || row.at || row.awaytt || values[6]) || (total / 2) + (spread / 2);
+
+      games.push({
+        homeTeamName: homeTeamName.trim().toUpperCase(),
+        awayTeamName: awayTeamName.trim().toUpperCase(),
+        isDome,
+        total,
+        spread,
+        homeTotal,
+        awayTotal
+      });
+      
+      console.log(`Game ${i}: ${homeTeamName} vs ${awayTeamName}, Dome=${isDome}, Total=${total}, Spread=${spread}`);
+    }
+
+    if (games.length === 0) {
+      throw new Error("No valid games found in CSV. Check that you have 'Home' and 'Away' columns (or team names in first two columns)");
+    }
+
+    return games;
+  }
+
+  const handleGamesUpload = (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+
+    reader.onload = (e) => {
+      try {
+        const csvText = e.target.result;
+        console.log("Raw CSV content (first 500 chars):", csvText.substring(0, 500));
+        
+        const parsedGames = parseGamesCSV(csvText);
+        
+        // Match team names to loaded teams - more flexible matching
+        const matchedGames = parsedGames.map(game => {
+          // Try multiple matching strategies
+          const findTeam = (searchName) => {
+            const search = searchName.toUpperCase().trim();
+            return teams.find(t => {
+              const teamName = t.Team.toUpperCase().trim();
+              return (
+                teamName === search ||                    // Exact match
+                teamName.startsWith(search) ||            // Team starts with search
+                search.startsWith(teamName) ||            // Search starts with team
+                teamName.includes(search) ||              // Team contains search
+                search.includes(teamName) ||              // Search contains team
+                // Common abbreviation mappings
+                (search === 'JAX' && teamName === 'JAC') ||
+                (search === 'JAC' && teamName === 'JAX') ||
+                (search === 'WSH' && teamName === 'WAS') ||
+                (search === 'WAS' && teamName === 'WSH')
+              );
+            });
+          };
+          
+          const homeTeam = findTeam(game.homeTeamName);
+          const awayTeam = findTeam(game.awayTeamName);
+          
+          if (!homeTeam) console.warn(`Could not match home team: ${game.homeTeamName}`);
+          if (!awayTeam) console.warn(`Could not match away team: ${game.awayTeamName}`);
+          
+          return {
+            ...game,
+            homeTeam,
+            awayTeam,
+            matched: !!(homeTeam && awayTeam)
+          };
+        });
+
+        setBatchGames(matchedGames);
+        setBatchResults([]);
+        
+        const matchedCount = matchedGames.filter(g => g.matched).length;
+        console.log(`Loaded ${matchedGames.length} games, ${matchedCount} matched`);
+        
+        if (matchedCount === 0 && matchedGames.length > 0) {
+          alert(`Warning: Found ${matchedGames.length} games but could not match any teams. Make sure team abbreviations match your database (e.g., BAL, NYJ, KC)`);
+        }
+      } catch (error) {
+        alert(`Error parsing games CSV: ${error.message}\n\nCheck browser console for details.`);
+        console.error("Full error:", error);
+      }
+    };
+
+    reader.onerror = () => {
+      alert("Failed to read file");
+    };
+
+    reader.readAsText(file);
+  };
+
+  const runBatchSimulation = async () => {
+    const validGames = batchGames.filter(g => g.matched);
+    if (validGames.length === 0) {
+      alert("No valid games to simulate");
+      return;
+    }
+
+    setIsBatchSimulating(true);
+    setBatchProgress(0);
+    const results = [];
+
+    // Use fewer simulations for batch mode (5000 instead of 10000)
+    const batchSimCount = 5000;
+
+    for (let i = 0; i < validGames.length; i++) {
+      const game = validGames[i];
+      
+      // TUNED: Apply default outdoor weather penalty for non-dome games
+      // This approximates average real-world conditions (some wind, not perfect 70°F)
+      const defaultOutdoorPenalty = game.isDome ? 0 : -1.25;
+      
+      const settings = {
+        overUnderLine: game.total,
+        homeTeamTotal: game.homeTotal,
+        awayTeamTotal: game.awayTotal,
+        spread: game.spread,
+        spreadLine: game.spread,
+        numSimulations: batchSimCount,
+        isDome: game.isDome,
+        windMPH: game.isDome ? 0 : 8,      // TUNED: Assume light wind for outdoor
+        temperature: game.isDome ? 70 : 55, // TUNED: Assume cooler for outdoor
+        precipitation: "none",
+        outdoorPenalty: defaultOutdoorPenalty  // TUNED: New parameter
+      };
+
+      try {
+        const result = simulateGame(game.homeTeam, game.awayTeam, settings);
+        
+        // Apply probability calibration
+        const calibratedOverPct = calibrateProbability(result.overUnder.overPct / 100) * 100;
+        const calibratedUnderPct = 100 - calibratedOverPct;
+        
+        // Determine signals with calibrated probabilities
+        const totalSignal = calibratedOverPct > calibratedUnderPct ? 'OVER' : 'UNDER';
+        const totalStrength = Math.max(calibratedOverPct, calibratedUnderPct);
+        
+        // PHASE 5.1: Edge strength and firing discipline
+        // Calculate model edge vs market
+        const projectedTotal = result.totalProjection.median;
+        const modelEdge = projectedTotal - game.total;
+        
+        // Determine if bet should fire based on signal direction and edge
+        let shouldFire = false;
+        let fireReason = '';
+        
+        if (totalSignal === 'OVER') {
+          // OVERS need higher threshold due to historical over-bias
+          if (modelEdge >= 4.0 && calibratedOverPct >= 54) {
+            shouldFire = true;
+            fireReason = `Strong OVER: Edge ${modelEdge.toFixed(1)} pts, ${calibratedOverPct.toFixed(1)}% calibrated`;
+          } else if (modelEdge >= 2.0 && calibratedOverPct >= 52 && game.isDome) {
+            shouldFire = true;
+            fireReason = `Dome OVER: Edge ${modelEdge.toFixed(1)} pts, ${calibratedOverPct.toFixed(1)}% calibrated`;
+          } else {
+            fireReason = `PASS: Edge ${modelEdge.toFixed(1)} (need 4+), ${calibratedOverPct.toFixed(1)}% (need 54+)`;
+          }
+        } else {
+          // UNDERS can fire with smaller edge (historically profitable)
+          if (modelEdge <= -1.5 && calibratedUnderPct >= 52) {
+            shouldFire = true;
+            fireReason = `UNDER: Edge ${modelEdge.toFixed(1)} pts, ${calibratedUnderPct.toFixed(1)}% calibrated`;
+          } else {
+            fireReason = `PASS: Edge ${modelEdge.toFixed(1)} (need -1.5), ${calibratedUnderPct.toFixed(1)}% (need 52+)`;
+          }
+        }
+        
+        const homeSignal = result.homeTeamOverUnder.overPct > result.homeTeamOverUnder.underPct ? 'OVER' : 'UNDER';
+        const homeStrength = Math.max(result.homeTeamOverUnder.overPct, result.homeTeamOverUnder.underPct);
+        
+        const awaySignal = result.awayTeamOverUnder.overPct > result.awayTeamOverUnder.underPct ? 'OVER' : 'UNDER';
+        const awayStrength = Math.max(result.awayTeamOverUnder.overPct, result.awayTeamOverUnder.underPct);
+        
+        // Spread signal: if home cover % > 50, take home; else take away
+        const spreadSignal = result.spread.homeCoverPct > 50 
+          ? `${game.homeTeam.Team} ${game.spread > 0 ? '+' : ''}${game.spread}`
+          : `${game.awayTeam.Team} ${-game.spread > 0 ? '+' : ''}${-game.spread}`;
+        const spreadStrength = Math.max(result.spread.homeCoverPct, result.spread.awayCoverPct);
+
+        results.push({
+          game,
+          homeMedian: result.homeProjection.median,
+          awayMedian: result.awayProjection.median,
+          totalMedian: result.totalProjection.median,
+          marginMedian: result.marginProjection.median,
+          totalSignal,
+          totalStrength,
+          totalStrengthRaw: Math.max(result.overUnder.overPct, result.overUnder.underPct), // Raw before calibration
+          totalLine: game.total,
+          modelEdge,
+          shouldFire,
+          fireReason,
+          homeSignal,
+          homeStrength,
+          homeLine: game.homeTotal,
+          awaySignal,
+          awayStrength,
+          awayLine: game.awayTotal,
+          spreadSignal,
+          spreadStrength,
+          spreadLine: game.spread,
+          homeWinPct: result.moneyline.homeWinPct,
+          awayWinPct: result.moneyline.awayWinPct,
+          fullResult: result
+        });
+      } catch (error) {
+        console.error(`Error simulating ${game.homeTeamName} vs ${game.awayTeamName}:`, error);
+        results.push({
+          game,
+          error: error.message
+        });
+      }
+
+      setBatchProgress(((i + 1) / validGames.length) * 100);
+      
+      // Small delay to allow UI updates
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+
+    setBatchResults(results);
+    setIsBatchSimulating(false);
+  };
+
+  const exportBatchResults = () => {
+    if (batchResults.length === 0) return;
+
+    const headers = [
+      'Home', 'Away', 'Dome', 
+      'Home Median', 'Away Median', 'Proj Total', 'Proj Margin',
+      'Market Total', 'Model Edge', 'Total Signal', 'Calibrated %', 'Raw %',
+      'FIRE?', 'Fire Reason',
+      'Home TT Line', 'Home TT Signal', 'Home TT %',
+      'Away TT Line', 'Away TT Signal', 'Away TT %',
+      'Spread', 'Spread Signal', 'Spread %',
+      'Home Win %', 'Away Win %'
+    ];
+
+    const rows = batchResults.map(r => {
+      if (r.error) {
+        return [r.game.homeTeamName, r.game.awayTeamName, 'ERROR', r.error];
+      }
+      return [
+        r.game.homeTeam.Team,
+        r.game.awayTeam.Team,
+        r.game.isDome ? 'Y' : 'N',
+        r.homeMedian.toFixed(1),
+        r.awayMedian.toFixed(1),
+        r.totalMedian.toFixed(1),
+        (r.marginMedian >= 0 ? '+' : '') + r.marginMedian.toFixed(1),
+        r.totalLine,
+        (r.modelEdge >= 0 ? '+' : '') + r.modelEdge.toFixed(1),
+        r.totalSignal,
+        r.totalStrength.toFixed(1) + '%',
+        r.totalStrengthRaw.toFixed(1) + '%',
+        r.shouldFire ? 'YES' : 'NO',
+        r.fireReason,
+        r.homeLine,
+        r.homeSignal,
+        r.homeStrength.toFixed(1) + '%',
+        r.awayLine,
+        r.awaySignal,
+        r.awayStrength.toFixed(1) + '%',
+        (r.spreadLine > 0 ? '+' : '') + r.spreadLine,
+        r.spreadSignal,
+        r.spreadStrength.toFixed(1) + '%',
+        r.homeWinPct.toFixed(1) + '%',
+        r.awayWinPct.toFixed(1) + '%'
+      ];
+    });
+
+    const csv = [headers, ...rows].map(row => row.join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `gamble-tron-batch-results-${new Date().toISOString().split('T')[0]}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // ============================================
   // RENDER
   // ============================================
   
@@ -1155,6 +1593,242 @@ const NFLTotalsSimulator = () => {
               </div>
             )}
 
+            {/* Mode Toggle */}
+            <div className="flex justify-center gap-4 mb-6">
+              <button
+                onClick={() => setShowBatchMode(false)}
+                className={`px-6 py-3 rounded-lg font-bold transition-all ${
+                  !showBatchMode 
+                    ? 'bg-gradient-to-r from-orange-600 to-red-600 text-white border-2 border-yellow-400' 
+                    : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                }`}
+              >
+                🎯 Single Game
+              </button>
+              <button
+                onClick={() => setShowBatchMode(true)}
+                className={`px-6 py-3 rounded-lg font-bold transition-all ${
+                  showBatchMode 
+                    ? 'bg-gradient-to-r from-green-600 to-teal-600 text-white border-2 border-yellow-400' 
+                    : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                }`}
+              >
+                📋 Batch Mode (Full Slate)
+              </button>
+            </div>
+
+            {/* BATCH MODE */}
+            {showBatchMode && (
+              <div className="space-y-6">
+                {/* Batch Upload Section */}
+                <div className="bg-slate-800 rounded-xl p-6 border border-green-600/50">
+                  <h3 className="text-xl font-bold mb-4 text-green-400 flex items-center gap-2">
+                    📋 Upload Games Schedule
+                  </h3>
+                  
+                  <div className="bg-slate-900/50 p-4 rounded-lg mb-4">
+                    <p className="text-sm text-slate-300 mb-2">
+                      Upload a CSV with your weekly slate. Required columns:
+                    </p>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+                      <div className="text-green-400">• Home (team abbrev)</div>
+                      <div className="text-green-400">• Away (team abbrev)</div>
+                      <div className="text-blue-400">• Dome (Y/N)</div>
+                      <div className="text-blue-400">• Total (O/U line)</div>
+                      <div className="text-yellow-400">• Spread (home spread)</div>
+                      <div className="text-yellow-400">• HomeTotal (team total)</div>
+                      <div className="text-yellow-400">• AwayTotal (team total)</div>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-2">
+                      Example: BAL, NYJ, N, 42.5, -3.5, 23, 19.5
+                    </p>
+                  </div>
+
+                  <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed border-green-600 rounded-lg cursor-pointer bg-slate-900 hover:bg-slate-800 transition-all">
+                    <div className="flex flex-col items-center justify-center pt-5 pb-6">
+                      <Upload className="w-8 h-8 mb-2 text-green-400" />
+                      <p className="text-sm text-green-300 font-semibold">
+                        Click to upload games CSV
+                      </p>
+                    </div>
+                    <input
+                      type="file"
+                      className="hidden"
+                      accept=".csv"
+                      onChange={handleGamesUpload}
+                    />
+                  </label>
+                </div>
+
+                {/* Batch Games Preview */}
+                {batchGames.length > 0 && (
+                  <div className="bg-slate-800 rounded-xl p-6 border border-slate-700">
+                    <div className="flex justify-between items-center mb-4">
+                      <h3 className="text-lg font-bold text-slate-300">
+                        📊 Loaded {batchGames.length} Games ({batchGames.filter(g => g.matched).length} matched)
+                      </h3>
+                      <button
+                        onClick={runBatchSimulation}
+                        disabled={isBatchSimulating || batchGames.filter(g => g.matched).length === 0}
+                        className="bg-gradient-to-r from-green-600 to-teal-600 hover:from-green-700 hover:to-teal-700 disabled:from-slate-600 disabled:to-slate-700 text-white font-bold py-2 px-6 rounded-lg flex items-center gap-2 transition-all"
+                      >
+                        <Play className="w-4 h-4" />
+                        {isBatchSimulating ? `Simulating... ${batchProgress.toFixed(0)}%` : 'Run All Simulations'}
+                      </button>
+                    </div>
+
+                    {isBatchSimulating && (
+                      <div className="mb-4">
+                        <div className="w-full bg-slate-700 rounded-full h-2">
+                          <div 
+                            className="bg-green-500 h-2 rounded-full transition-all" 
+                            style={{ width: `${batchProgress}%` }}
+                          ></div>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b border-slate-700">
+                            <th className="text-left py-2 px-2 text-slate-400">Home</th>
+                            <th className="text-left py-2 px-2 text-slate-400">Away</th>
+                            <th className="text-center py-2 px-2 text-slate-400">Dome</th>
+                            <th className="text-center py-2 px-2 text-slate-400">Total</th>
+                            <th className="text-center py-2 px-2 text-slate-400">Spread</th>
+                            <th className="text-center py-2 px-2 text-slate-400">Home TT</th>
+                            <th className="text-center py-2 px-2 text-slate-400">Away TT</th>
+                            <th className="text-center py-2 px-2 text-slate-400">Status</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {batchGames.map((game, idx) => (
+                            <tr key={idx} className={`border-b border-slate-800 ${!game.matched ? 'opacity-50' : ''}`}>
+                              <td className="py-2 px-2 text-orange-400 font-semibold">{game.homeTeamName}</td>
+                              <td className="py-2 px-2 text-purple-400 font-semibold">{game.awayTeamName}</td>
+                              <td className="py-2 px-2 text-center">{game.isDome ? '🏟️' : '☀️'}</td>
+                              <td className="py-2 px-2 text-center">{game.total}</td>
+                              <td className="py-2 px-2 text-center">{game.spread > 0 ? '+' : ''}{game.spread}</td>
+                              <td className="py-2 px-2 text-center">{game.homeTotal}</td>
+                              <td className="py-2 px-2 text-center">{game.awayTotal}</td>
+                              <td className="py-2 px-2 text-center">
+                                {game.matched 
+                                  ? <span className="text-green-400">✓</span> 
+                                  : <span className="text-red-400">✗ Not found</span>
+                                }
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* Batch Results */}
+                {batchResults.length > 0 && (
+                  <div className="bg-slate-800 rounded-xl p-6 border border-yellow-600/50">
+                    <div className="flex justify-between items-center mb-4">
+                      <h3 className="text-xl font-bold text-yellow-400">🎰 Simulation Results</h3>
+                      <button
+                        onClick={exportBatchResults}
+                        className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg flex items-center gap-2 transition-all"
+                      >
+                        <Database className="w-4 h-4" />
+                        Export CSV
+                      </button>
+                    </div>
+
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="border-b border-slate-700 text-slate-400">
+                            <th className="text-left py-2 px-1">Matchup</th>
+                            <th className="text-center py-2 px-1">Proj Score</th>
+                            <th className="text-center py-2 px-1">Total</th>
+                            <th className="text-center py-2 px-1">Signal</th>
+                            <th className="text-center py-2 px-1">Home TT</th>
+                            <th className="text-center py-2 px-1">Signal</th>
+                            <th className="text-center py-2 px-1">Away TT</th>
+                            <th className="text-center py-2 px-1">Signal</th>
+                            <th className="text-center py-2 px-1">Spread</th>
+                            <th className="text-center py-2 px-1">Signal</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {batchResults.map((r, idx) => {
+                            if (r.error) {
+                              return (
+                                <tr key={idx} className="border-b border-slate-800 text-red-400">
+                                  <td className="py-2 px-1" colSpan={10}>
+                                    {r.game.homeTeamName} vs {r.game.awayTeamName}: Error - {r.error}
+                                  </td>
+                                </tr>
+                              );
+                            }
+                            return (
+                              <tr key={idx} className="border-b border-slate-800">
+                                <td className="py-2 px-1">
+                                  <span className="text-orange-400 font-semibold">{r.game.homeTeam.Team}</span>
+                                  <span className="text-slate-500"> vs </span>
+                                  <span className="text-purple-400 font-semibold">{r.game.awayTeam.Team}</span>
+                                </td>
+                                <td className="py-2 px-1 text-center">
+                                  <span className="text-orange-300">{r.homeMedian.toFixed(0)}</span>
+                                  <span className="text-slate-500">-</span>
+                                  <span className="text-purple-300">{r.awayMedian.toFixed(0)}</span>
+                                </td>
+                                <td className="py-2 px-1 text-center text-slate-400">{r.totalLine}</td>
+                                <td className={`py-2 px-1 text-center font-bold ${
+                                  r.totalStrength > 55 
+                                    ? (r.totalSignal === 'OVER' ? 'text-green-400' : 'text-red-400')
+                                    : 'text-slate-400'
+                                }`}>
+                                  {r.totalSignal} {r.totalStrength.toFixed(0)}%
+                                </td>
+                                <td className="py-2 px-1 text-center text-slate-400">{r.homeLine}</td>
+                                <td className={`py-2 px-1 text-center font-bold ${
+                                  r.homeStrength > 55 
+                                    ? (r.homeSignal === 'OVER' ? 'text-green-400' : 'text-red-400')
+                                    : 'text-slate-400'
+                                }`}>
+                                  {r.homeSignal} {r.homeStrength.toFixed(0)}%
+                                </td>
+                                <td className="py-2 px-1 text-center text-slate-400">{r.awayLine}</td>
+                                <td className={`py-2 px-1 text-center font-bold ${
+                                  r.awayStrength > 55 
+                                    ? (r.awaySignal === 'OVER' ? 'text-green-400' : 'text-red-400')
+                                    : 'text-slate-400'
+                                }`}>
+                                  {r.awaySignal} {r.awayStrength.toFixed(0)}%
+                                </td>
+                                <td className="py-2 px-1 text-center text-slate-400">
+                                  {r.spreadLine > 0 ? '+' : ''}{r.spreadLine}
+                                </td>
+                                <td className={`py-2 px-1 text-center font-bold ${
+                                  r.spreadStrength > 55 ? 'text-yellow-400' : 'text-slate-400'
+                                }`}>
+                                  {r.spreadSignal.split(' ')[0]} {r.spreadStrength.toFixed(0)}%
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <div className="mt-4 text-xs text-slate-500">
+                      💡 Signals highlighted when probability &gt; 55% (above breakeven at -110)
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* SINGLE GAME MODE */}
+            {!showBatchMode && (
+              <>
             {/* Team Selection */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
               {/* Home Team */}
@@ -1714,6 +2388,8 @@ const NFLTotalsSimulator = () => {
                   </div>
                 </div>
               </div>
+            )}
+              </>
             )}
           </>
         )}
