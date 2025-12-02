@@ -5,48 +5,17 @@ import { Upload, Play, BarChart3, TrendingUp, Database, AlertCircle } from "luci
 
 /**
  * NFL Monte Carlo Simulator - FULL COMPOSITE MODEL
- * VERSION: TUNED (Post-59 Game Backtest)
- * 
- * ============================================
- * TUNING CHANGES APPLIED (Based on Historical Audit)
- * ============================================
- * 
- * PHASE 1 - Structural Bias Fixes:
- * - HFA now symmetric (+HFA/2 home, -HFA/2 away) for neutral total impact
- * - Outdoor games get default -1.25 penalty in batch mode
- * - Dome bonus reduced from 1.5 to 0.5
- * 
- * PHASE 2 - Variance & Calibration:
- * - SigmaTeam widened to 7.5-12.0 range (was 6.5-9.5)
- * - Correlation capped at 0.40 (was 0.60)
- * - Post-hoc probability calibration with 0.5 shrinkage factor
- * 
- * PHASE 3 - CER Rebalancing:
- * - Defensive PPD weight: 0.25 (was 0.15)
- * - Defensive SR weight: 0.20 (was 0.25)
- * - CER_TO_PPD_SCALE: 0.25 (was 0.32)
- * - LAMBDA: 0.75 (was 0.85)
- * - PPD lower bound: 1.0 (was 1.2)
- * 
- * PHASE 4 - Game Script & Drives:
- * - Drive differential cap: ±1.5 (was ±1.0)
- * - Game script modifier: -0.5 to -3.0 for spreads 7+
- * 
- * PHASE 5 - Betting Discipline:
- * - OVER threshold: Need +4 edge AND 54%+ calibrated prob
- * - UNDER threshold: Need -1.5 edge AND 52%+ calibrated prob
- * - Dome OVER exception: +2 edge AND 52%+ allowed
  * 
  * ============================================
  * TIER 1: COMPOSITE EFFICIENCY RATING (CER)
  * ============================================
  * Uses z-score weighted composite of:
- * - PPD (0.45) - Actual scoring output
- * - EPA/play (0.20) - Most predictive efficiency metric  
- * - Success Rate (0.15) - Drive sustainability
+ * - PPD (0.30) - Actual scoring output
+ * - EPA/play (0.25) - Most predictive efficiency metric  
+ * - Success Rate (0.20) - Drive sustainability
  * - RZ TD Rate (0.10) - Finishing ability
- * - TO% (0.03 negative) - Ball security
- * - RZ Drives/Game (0.07) - Opportunity creation
+ * - TO% (0.10 negative) - Ball security
+ * - RZ Drives/Game (0.05) - Opportunity creation
  * 
  * ============================================
  * TIER 2: PACE-BASED DRIVES MODEL
@@ -62,7 +31,7 @@ import { Upload, Play, BarChart3, TrendingUp, Database, AlertCircle } from "luci
  * ============================================
  * TIER 4: FINAL PROJECTION
  * ============================================
- * Expected_Points = Matchup_PPD × Expected_Drives × Weather × GameScript
+ * Expected_Points = Matchup_PPD × Expected_Drives × Weather
  */
 
 const NFLTotalsSimulator = () => {
@@ -175,11 +144,10 @@ const NFLTotalsSimulator = () => {
       off_TO: -0.03,         // Negative: higher TO% is bad
       
       // Defensive CER weights (preventing points)
-      // TUNED: Increased def_PPD from 0.15 to 0.25 to better detect low-scoring environments
       def_EPA: 0.30,
-      def_PPD: 0.25,          // TUNED: Up from 0.15
-      def_SR: 0.20,           // TUNED: Down from 0.25
-      def_RZDrives: 0.15,     // TUNED: Down from 0.20
+      def_SR: 0.25,
+      def_RZDrives: 0.20,
+      def_PPD: 0.15,
       def_RZTD: 0.07,
       def_TO: 0.03,          // Positive: more forced TOs makes defense better
     },
@@ -196,13 +164,13 @@ const NFLTotalsSimulator = () => {
     },
     
     // Shrinkage and adjustments
-    LAMBDA: 0.75,             // TUNED: Reduced from 0.85 to shrink extremes harder
+    LAMBDA: 0.85,             // Shrinkage factor
     HOME_FIELD_ADV: 1.3,      // Home field advantage in points
-    CER_TO_PPD_SCALE: 0.25,   // TUNED: Reduced from 0.32 to tame offensive blowups
+    CER_TO_PPD_SCALE: 0.32,   // Scale CER z-scores to PPD adjustment
     
     // Weather coefficients
     weather: {
-      dome_bonus: 0.5,  // TUNED: Reduced from 1.5 to avoid double-counting
+      dome_bonus: 1.5,
       wind_per_mph_above_threshold: -0.06,
       wind_threshold: 10,
       extreme_cold_threshold: 25,
@@ -274,33 +242,6 @@ const NFLTotalsSimulator = () => {
     return prob >= 0.5 
       ? -Math.round((prob / (1 - prob)) * 100)
       : Math.round(((1 - prob) / prob) * 100);
-  };
-
-  /**
-   * PHASE 2.3: Post-hoc probability calibration
-   * Based on historical backtest: model probabilities are overconfident
-   * This applies Platt-style sigmoid calibration to deflate extreme probabilities
-   * 
-   * Calibration curve fitted from historical data:
-   * - 50-55% raw → ~48-51% calibrated
-   * - 55-60% raw → ~50-53% calibrated  
-   * - 60-65% raw → ~48-52% calibrated (model was least accurate here)
-   * - 65-75% raw → ~52-58% calibrated
-   * - 75%+ raw → ~55-62% calibrated
-   */
-  const calibrateProbability = (rawProb) => {
-    // Convert to log-odds space
-    const logOdds = Math.log(rawProb / (1 - rawProb));
-    
-    // Apply shrinkage toward 0.5 (shrink log-odds toward 0)
-    // Calibration factor of 0.5 means we believe about half the edge
-    const calibrationFactor = 0.50;
-    const calibratedLogOdds = logOdds * calibrationFactor;
-    
-    // Convert back to probability
-    const calibrated = 1 / (1 + Math.exp(-calibratedLogOdds));
-    
-    return calibrated;
   };
 
   // ============================================
@@ -523,11 +464,11 @@ const NFLTotalsSimulator = () => {
     let homeDrives = baseDrivesEach + (turnoverSwing / 2) + cappedPaceEdge;
     let awayDrives = baseDrivesEach - (turnoverSwing / 2) - cappedPaceEdge;
     
-    // HARD CONSTRAINT: Differential cannot exceed ±1.5
-    // TUNED: Increased from ±1.0 to better reflect real pace/TO mismatches
+    // HARD CONSTRAINT: Differential cannot exceed ±1.0
+    // In real NFL games, drive counts almost always within 1 of each other
     const differential = homeDrives - awayDrives;
-    if (Math.abs(differential) > 1.5) {
-      const excess = (Math.abs(differential) - 1.5) / 2;
+    if (Math.abs(differential) > 1.0) {
+      const excess = (Math.abs(differential) - 1.0) / 2;
       if (differential > 0) {
         homeDrives -= excess;
         awayDrives += excess;
@@ -594,21 +535,19 @@ const NFLTotalsSimulator = () => {
     const homePPD = params.lg.PPD + params.LAMBDA * (homeRawPPD - params.lg.PPD);
     const awayPPD = params.lg.PPD + params.LAMBDA * (awayRawPPD - params.lg.PPD);
     
-    // TUNED: Apply symmetric HFA (+HFA/2 to home, -HFA/2 to away)
-    // This keeps total scoring neutral while giving home team the edge
-    const hfaPerDrive = params.HOME_FIELD_ADV / params.lg.Drives;
-    const homeFinalPPD = homePPD + (hfaPerDrive / 2);
-    const awayFinalPPD = awayPPD - (hfaPerDrive / 2);
+    // Add home field advantage (in PPD terms)
+    const homeAdvPPD = params.HOME_FIELD_ADV / params.lg.Drives;
+    const homeFinalPPD = homePPD + homeAdvPPD;
     
     console.log(`\n=== MATCHUP PPD ===`);
     console.log(`  Home CER matchup: ${homeOffCER.CER.toFixed(3)} (off) - ${awayDefCER.CER.toFixed(3)} (opp def) = ${homeMatchupCER.toFixed(3)}`);
     console.log(`  Away CER matchup: ${awayOffCER.CER.toFixed(3)} (off) - ${homeDefCER.CER.toFixed(3)} (opp def) = ${awayMatchupCER.toFixed(3)}`);
-    console.log(`  Home PPD: ${params.lg.PPD.toFixed(2)} + ${homePPDAdj.toFixed(3)} = ${homeRawPPD.toFixed(3)} → shrunk to ${homePPD.toFixed(3)} + HFA/2 ${(hfaPerDrive/2).toFixed(3)} = ${homeFinalPPD.toFixed(3)}`);
-    console.log(`  Away PPD: ${params.lg.PPD.toFixed(2)} + ${awayPPDAdj.toFixed(3)} = ${awayRawPPD.toFixed(3)} → shrunk to ${awayPPD.toFixed(3)} - HFA/2 ${(hfaPerDrive/2).toFixed(3)} = ${awayFinalPPD.toFixed(3)}`);
+    console.log(`  Home PPD: ${params.lg.PPD.toFixed(2)} + ${homePPDAdj.toFixed(3)} = ${homeRawPPD.toFixed(3)} → shrunk to ${homePPD.toFixed(3)} + HFA ${homeAdvPPD.toFixed(3)} = ${homeFinalPPD.toFixed(3)}`);
+    console.log(`  Away PPD: ${params.lg.PPD.toFixed(2)} + ${awayPPDAdj.toFixed(3)} = ${awayRawPPD.toFixed(3)} → shrunk to ${awayPPD.toFixed(3)}`);
     
     return {
-      homePPD: clamp(homeFinalPPD, 1.0, 3.5),  // TUNED: Lower bound from 1.2 to 1.0
-      awayPPD: clamp(awayFinalPPD, 1.0, 3.5),  // TUNED: Lower bound from 1.2 to 1.0
+      homePPD: clamp(homeFinalPPD, 1.2, 3.5),
+      awayPPD: clamp(awayPPD, 1.2, 3.5),
       homeOffCER,
       homeDefCER,
       awayOffCER,
@@ -658,8 +597,7 @@ const NFLTotalsSimulator = () => {
     if (avgPace < 27.4) rho += 0.05;       // Both teams fast (below P10)
     else if (avgPace > 29.8) rho -= 0.03;  // Both teams slow (above P90)
     
-    // TUNED: Capped at 0.40 (was 0.60) to avoid over-tight distributions
-    return clamp(rho, -0.05, 0.40);
+    return clamp(rho, -0.05, 0.60);
   }
 
   // ============================================
@@ -858,29 +796,14 @@ const NFLTotalsSimulator = () => {
     // Calculate weather adjustment
     const weatherAdj = calculateWeatherAdjustment(settings);
     
-    // TUNED: Add outdoor penalty if provided (for batch mode)
-    const outdoorPenalty = settings.outdoorPenalty || 0;
-    
-    // PHASE 4.2: Game-script modifier for big spreads
-    // Heavy favorites run the clock → fewer plays → lower totals
-    const absSpread = Math.abs(settings.spread || 0);
-    let gameScriptAdj = 0;
-    if (absSpread >= 14) {
-      gameScriptAdj = -3.0;  // Big blowout expected
-    } else if (absSpread >= 10) {
-      gameScriptAdj = -2.0;  // Moderate blowout
-    } else if (absSpread >= 7) {
-      gameScriptAdj = -0.5;  // Slight adjustment
-    }
-    
     // TIER 4: Calculate expected points
-    const homeExpPts = matchup.homePPD * drives.homeDrives + (weatherAdj / 2) + (outdoorPenalty / 2) + (gameScriptAdj / 2);
-    const awayExpPts = matchup.awayPPD * drives.awayDrives + (weatherAdj / 2) + (outdoorPenalty / 2) + (gameScriptAdj / 2);
+    const homeExpPts = matchup.homePPD * drives.homeDrives + (weatherAdj / 2);
+    const awayExpPts = matchup.awayPPD * drives.awayDrives + (weatherAdj / 2);
     
     console.log(`\n=== FINAL PROJECTIONS ===`);
-    console.log(`  Home: ${matchup.homePPD.toFixed(3)} PPD × ${drives.homeDrives.toFixed(2)} drives + weather ${(weatherAdj/2).toFixed(1)} + outdoor ${(outdoorPenalty/2).toFixed(1)} + script ${(gameScriptAdj/2).toFixed(1)} = ${homeExpPts.toFixed(1)} pts`);
-    console.log(`  Away: ${matchup.awayPPD.toFixed(3)} PPD × ${drives.awayDrives.toFixed(2)} drives + weather ${(weatherAdj/2).toFixed(1)} + outdoor ${(outdoorPenalty/2).toFixed(1)} + script ${(gameScriptAdj/2).toFixed(1)} = ${awayExpPts.toFixed(1)} pts`);
-    console.log(`  Total: ${(homeExpPts + awayExpPts).toFixed(1)} | Correlation: ${rho.toFixed(3)} | Game Script Adj: ${gameScriptAdj.toFixed(1)}`);
+    console.log(`  Home: ${matchup.homePPD.toFixed(3)} PPD × ${drives.homeDrives.toFixed(2)} drives + ${(weatherAdj/2).toFixed(1)} weather = ${homeExpPts.toFixed(1)} pts`);
+    console.log(`  Away: ${matchup.awayPPD.toFixed(3)} PPD × ${drives.awayDrives.toFixed(2)} drives + ${(weatherAdj/2).toFixed(1)} weather = ${awayExpPts.toFixed(1)} pts`);
+    console.log(`  Total: ${(homeExpPts + awayExpPts).toFixed(1)} | Correlation: ${rho.toFixed(3)}`);
     console.log(`========================================\n`);
     
     // Run Monte Carlo simulations
@@ -902,8 +825,8 @@ const NFLTotalsSimulator = () => {
       matchupDetails: matchup
     };
     
-    // TUNED: Widened sigma range for fatter tails (was 6.5-9.5, now 7.5-12.0)
-    const sigmaTeam = (expectedPts) => Math.max(7.5, Math.min(12.0, 6.0 + 0.20 * (expectedPts - 20)));
+    // Heteroskedastic sigma function
+    const sigmaTeam = (expectedPts) => Math.max(6.5, Math.min(9.5, 5.5 + 0.15 * (expectedPts - 20)));
     
     for (let i = 0; i < numSims; i++) {
       // Generate correlated random values (Box-Muller)
@@ -1262,10 +1185,6 @@ const NFLTotalsSimulator = () => {
     for (let i = 0; i < validGames.length; i++) {
       const game = validGames[i];
       
-      // TUNED: Apply default outdoor weather penalty for non-dome games
-      // This approximates average real-world conditions (some wind, not perfect 70°F)
-      const defaultOutdoorPenalty = game.isDome ? 0 : -1.25;
-      
       const settings = {
         overUnderLine: game.total,
         homeTeamTotal: game.homeTotal,
@@ -1274,52 +1193,17 @@ const NFLTotalsSimulator = () => {
         spreadLine: game.spread,
         numSimulations: batchSimCount,
         isDome: game.isDome,
-        windMPH: game.isDome ? 0 : 8,      // TUNED: Assume light wind for outdoor
-        temperature: game.isDome ? 70 : 55, // TUNED: Assume cooler for outdoor
-        precipitation: "none",
-        outdoorPenalty: defaultOutdoorPenalty  // TUNED: New parameter
+        windMPH: 0,
+        temperature: 70,
+        precipitation: "none"
       };
 
       try {
         const result = simulateGame(game.homeTeam, game.awayTeam, settings);
         
-        // Apply probability calibration
-        const calibratedOverPct = calibrateProbability(result.overUnder.overPct / 100) * 100;
-        const calibratedUnderPct = 100 - calibratedOverPct;
-        
-        // Determine signals with calibrated probabilities
-        const totalSignal = calibratedOverPct > calibratedUnderPct ? 'OVER' : 'UNDER';
-        const totalStrength = Math.max(calibratedOverPct, calibratedUnderPct);
-        
-        // PHASE 5.1: Edge strength and firing discipline
-        // Calculate model edge vs market
-        const projectedTotal = result.totalProjection.median;
-        const modelEdge = projectedTotal - game.total;
-        
-        // Determine if bet should fire based on signal direction and edge
-        let shouldFire = false;
-        let fireReason = '';
-        
-        if (totalSignal === 'OVER') {
-          // OVERS need higher threshold due to historical over-bias
-          if (modelEdge >= 4.0 && calibratedOverPct >= 54) {
-            shouldFire = true;
-            fireReason = `Strong OVER: Edge ${modelEdge.toFixed(1)} pts, ${calibratedOverPct.toFixed(1)}% calibrated`;
-          } else if (modelEdge >= 2.0 && calibratedOverPct >= 52 && game.isDome) {
-            shouldFire = true;
-            fireReason = `Dome OVER: Edge ${modelEdge.toFixed(1)} pts, ${calibratedOverPct.toFixed(1)}% calibrated`;
-          } else {
-            fireReason = `PASS: Edge ${modelEdge.toFixed(1)} (need 4+), ${calibratedOverPct.toFixed(1)}% (need 54+)`;
-          }
-        } else {
-          // UNDERS can fire with smaller edge (historically profitable)
-          if (modelEdge <= -1.5 && calibratedUnderPct >= 52) {
-            shouldFire = true;
-            fireReason = `UNDER: Edge ${modelEdge.toFixed(1)} pts, ${calibratedUnderPct.toFixed(1)}% calibrated`;
-          } else {
-            fireReason = `PASS: Edge ${modelEdge.toFixed(1)} (need -1.5), ${calibratedUnderPct.toFixed(1)}% (need 52+)`;
-          }
-        }
+        // Determine signals
+        const totalSignal = result.overUnder.overPct > result.overUnder.underPct ? 'OVER' : 'UNDER';
+        const totalStrength = Math.max(result.overUnder.overPct, result.overUnder.underPct);
         
         const homeSignal = result.homeTeamOverUnder.overPct > result.homeTeamOverUnder.underPct ? 'OVER' : 'UNDER';
         const homeStrength = Math.max(result.homeTeamOverUnder.overPct, result.homeTeamOverUnder.underPct);
@@ -1341,11 +1225,7 @@ const NFLTotalsSimulator = () => {
           marginMedian: result.marginProjection.median,
           totalSignal,
           totalStrength,
-          totalStrengthRaw: Math.max(result.overUnder.overPct, result.overUnder.underPct), // Raw before calibration
           totalLine: game.total,
-          modelEdge,
-          shouldFire,
-          fireReason,
           homeSignal,
           homeStrength,
           homeLine: game.homeTotal,
@@ -1383,8 +1263,7 @@ const NFLTotalsSimulator = () => {
     const headers = [
       'Home', 'Away', 'Dome', 
       'Home Median', 'Away Median', 'Proj Total', 'Proj Margin',
-      'Market Total', 'Model Edge', 'Total Signal', 'Calibrated %', 'Raw %',
-      'FIRE?', 'Fire Reason',
+      'Market Total', 'Total Signal', 'Total %',
       'Home TT Line', 'Home TT Signal', 'Home TT %',
       'Away TT Line', 'Away TT Signal', 'Away TT %',
       'Spread', 'Spread Signal', 'Spread %',
@@ -1404,12 +1283,8 @@ const NFLTotalsSimulator = () => {
         r.totalMedian.toFixed(1),
         (r.marginMedian >= 0 ? '+' : '') + r.marginMedian.toFixed(1),
         r.totalLine,
-        (r.modelEdge >= 0 ? '+' : '') + r.modelEdge.toFixed(1),
         r.totalSignal,
         r.totalStrength.toFixed(1) + '%',
-        r.totalStrengthRaw.toFixed(1) + '%',
-        r.shouldFire ? 'YES' : 'NO',
-        r.fireReason,
         r.homeLine,
         r.homeSignal,
         r.homeStrength.toFixed(1) + '%',
