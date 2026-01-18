@@ -1055,9 +1055,9 @@ const NFLTotalsSimulator = () => {
       console.log(`Row ${i} parsed:`, row);
 
       // Find home/away team columns (very flexible naming)
-      const homeTeamName = row.home || row.hometeam || row.hometeam || row.hm || row.h ||
+      const homeTeamName = row.home || row.hometeam || row.home_team || row.hm || row.h ||
                           values[0]; // Fallback to first column
-      const awayTeamName = row.away || row.awayteam || row.awayteam || row.aw || row.a ||
+      const awayTeamName = row.away || row.awayteam || row.away_team || row.aw || row.a ||
                           row.visitor || row.road ||
                           values[1]; // Fallback to second column
       
@@ -1072,10 +1072,10 @@ const NFLTotalsSimulator = () => {
       const isDome = ['y', 'yes', '1', 'true', 'dome', 'indoor', 'retractable'].includes(domeRaw);
 
       // Parse numeric fields - check multiple column names
-      const total = parseFloat(row.total || row.ou || row.ou || row.overunder || row.over || row.line || values[3]) || 44.5;
+      const total = parseFloat(row.total || row.ou || row.overunder || row.over || row.line || values[3]) || 44.5;
       const spread = parseFloat(row.spread || row.sprd || row.homespread || row.hspread || values[4]) || -3;
-      const homeTotal = parseFloat(row.hometotal || row.home_total || row.hometotal || row.ht || row.homett || values[5]) || (total / 2) - (spread / 2);
-      const awayTotal = parseFloat(row.awaytotal || row.away_total || row.awaytotal || row.at || row.awaytt || values[6]) || (total / 2) + (spread / 2);
+      const homeTotal = parseFloat(row.hometotal || row.home_total || row.ht || row.homett || values[5]) || (total / 2) - (spread / 2);
+      const awayTotal = parseFloat(row.awaytotal || row.away_total || row.at || row.awaytt || values[6]) || (total / 2) + (spread / 2);
 
       games.push({
         homeTeamName: homeTeamName.trim().toUpperCase(),
